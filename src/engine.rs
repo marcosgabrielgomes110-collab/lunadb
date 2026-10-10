@@ -1,0 +1,698 @@
+use chrono::Utc;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use uuid::Uuid;
+
+use crate::crypto::{self, Keyring};
+use crate::error::{AppError, FieldError, RecordError};
+use crate::models::*;
+use crate::query::{self, QueryRequest};
+use crate::schema::{self, Mode, TableSchema, UniqueIndex};
+use crate::state::AppState;
+use crate::storage;
+
+macro_rules! ops {
+    ($op:expr; $($key:ident = $value:expr),* $(,)?) => {
+        tracing::info!(target: "lunadb::ops", op = %$op, $($key = %$value),*);
+    };
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub struct ListParams {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+pub fn validate_name(name: &str) -> Result<(), AppError> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!("nome invalido: '{name}'")))
+    }
+}
+
+pub fn validate_grant(grant: &Grant) -> Result<(), AppError> {
+    if grant.db == "*" {
+        Ok(())
+    } else {
+        validate_name(&grant.db)
+    }
+}
+
+pub async fn roles(state: &AppState) -> Result<RolesFile, AppError> {
+    Ok(storage::read_json(&state.paths.roles_file()).await?)
+}
+
+async fn dbs(state: &AppState) -> Result<DbsFile, AppError> {
+    Ok(storage::read_json(&state.paths.dbs_registry()).await?)
+}
+
+fn granted_level(grants: &[Grant], db: &str) -> Option<Level> {
+    grants
+        .iter()
+        .filter(|grant| grant.db == db || grant.db == "*")
+        .map(|grant| grant.level)
+        .max()
+}
+
+fn effective_level_with(roles: &RolesFile, user: &User, db: &str) -> Option<Level> {
+    if user.role == ROLE_ADMIN {
+        return Some(Level::Admin);
+    }
+    let role_level = roles
+        .roles
+        .iter()
+        .find(|role| role.name == user.role)
+        .and_then(|role| granted_level(&role.permissions, db));
+    let user_level = granted_level(&user.grants, db);
+    match (role_level, user_level) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+pub async fn effective_level(
+    state: &AppState,
+    user: &User,
+    db: &str,
+) -> Result<Option<Level>, AppError> {
+    if user.role == ROLE_ADMIN {
+        return Ok(Some(Level::Admin));
+    }
+    let roles = roles(state).await?;
+    Ok(effective_level_with(&roles, user, db))
+}
+
+pub async fn require_level(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    min: Level,
+) -> Result<(), AppError> {
+    match effective_level(state, user, db).await? {
+        Some(level) if level >= min => Ok(()),
+        Some(_) => Err(AppError::Forbidden(format!(
+            "permissao '{}' necessaria no db '{db}'",
+            min.as_str()
+        ))),
+        None => Err(AppError::Forbidden(format!("sem acesso ao db '{db}'"))),
+    }
+}
+
+async fn ensure_db_exists(state: &AppState, db: &str) -> Result<(), AppError> {
+    let dbs = dbs(state).await?;
+    if dbs.dbs.iter().any(|meta| meta.name == db) {
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!("db '{db}'")))
+    }
+}
+
+pub async fn list_dbs(state: &AppState, user: &User) -> Result<Vec<DbMeta>, AppError> {
+    let dbs = dbs(state).await?;
+    let metas = if user.role == ROLE_ADMIN {
+        dbs.dbs
+    } else {
+        let roles = roles(state).await?;
+        dbs.dbs
+            .into_iter()
+            .filter(|meta| effective_level_with(&roles, user, &meta.name).is_some())
+            .collect()
+    };
+    ops!("list_dbs"; user = user.username, count = metas.len());
+    Ok(metas)
+}
+
+pub async fn get_db(state: &AppState, user: &User, name: &str) -> Result<DbMeta, AppError> {
+    validate_name(name)?;
+    let dbs = dbs(state).await?;
+    let meta = dbs
+        .dbs
+        .into_iter()
+        .find(|meta| meta.name == name)
+        .ok_or_else(|| AppError::NotFound(format!("db '{name}'")))?;
+    require_level(state, user, name, Level::Read).await?;
+    ops!("get_db"; user = user.username, db = name);
+    Ok(meta)
+}
+
+pub async fn create_db(state: &AppState, user: &User, name: &str) -> Result<DbMeta, AppError> {
+    if user.role != ROLE_ADMIN {
+        return Err(AppError::Forbidden(
+            "apenas administradores podem criar dbs".to_string(),
+        ));
+    }
+    validate_name(name)?;
+    let _guard = state.lock.write().await;
+    let mut dbs = dbs(state).await?;
+    if dbs.dbs.iter().any(|meta| meta.name == name) {
+        return Err(AppError::Conflict(format!("db '{name}' ja existe")));
+    }
+    let meta = DbMeta {
+        name: name.to_string(),
+        owner_id: user.id.clone(),
+        created_at: Utc::now(),
+    };
+    tokio::fs::create_dir_all(state.paths.db_dir(name)).await?;
+    dbs.dbs.push(meta.clone());
+    storage::write_json(&state.paths.dbs_registry(), &dbs).await?;
+    ops!("create_db"; user = user.username, db = name);
+    Ok(meta)
+}
+
+pub async fn delete_db(state: &AppState, user: &User, name: &str) -> Result<(), AppError> {
+    validate_name(name)?;
+    let _guard = state.lock.write().await;
+    let mut dbs = dbs(state).await?;
+    let index = dbs
+        .dbs
+        .iter()
+        .position(|meta| meta.name == name)
+        .ok_or_else(|| AppError::NotFound(format!("db '{name}'")))?;
+    if user.role != ROLE_ADMIN {
+        let level = effective_level(state, user, name).await?;
+        if level != Some(Level::Admin) {
+            return Err(AppError::Forbidden(format!(
+                "permissao 'admin' necessaria no db '{name}'"
+            )));
+        }
+    }
+    let dir = state.paths.db_dir(name);
+    if dir.exists() {
+        tokio::fs::remove_dir_all(&dir).await?;
+    }
+    dbs.dbs.remove(index);
+    storage::write_json(&state.paths.dbs_registry(), &dbs).await?;
+    ops!("delete_db"; user = user.username, db = name);
+    Ok(())
+}
+
+pub async fn list_tables(
+    state: &AppState,
+    user: &User,
+    db: &str,
+) -> Result<Vec<String>, AppError> {
+    validate_name(db)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Read).await?;
+    let mut names = Vec::new();
+    let mut entries = tokio::fs::read_dir(state.paths.db_dir(db)).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        {
+            names.push(stem.to_string());
+        }
+    }
+    names.sort();
+    ops!("list_tables"; user = user.username, db = db, count = names.len());
+    Ok(names)
+}
+
+pub async fn create_table(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    schema: Option<TableSchema>,
+) -> Result<String, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Write).await?;
+    if let Some(schema) = &schema {
+        schema::compile(schema)?;
+    }
+    let _guard = state.lock.write().await;
+    let path = state.paths.table_file(db, table);
+    if path.exists() {
+        return Err(AppError::Conflict(format!(
+            "tabela '{table}' ja existe no db '{db}'"
+        )));
+    }
+    let has_schema = schema.is_some();
+    let file = TableFile {
+        name: table.to_string(),
+        created_at: Some(Utc::now()),
+        schema,
+        records: Default::default(),
+    };
+    storage::write_json(&path, &file).await?;
+    ops!("create_table"; user = user.username, db = db, table = table, schema = has_schema);
+    Ok(table.to_string())
+}
+
+pub async fn delete_table(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+) -> Result<(), AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Write).await?;
+    let _guard = state.lock.write().await;
+    let path = state.paths.table_file(db, table);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {
+            ops!("delete_table"; user = user.username, db = db, table = table);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(AppError::NotFound(format!("tabela '{db}.{table}'")))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn read_table(state: &AppState, db: &str, table: &str) -> Result<TableFile, AppError> {
+    let path = state.paths.table_file(db, table);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(AppError::NotFound(format!("tabela '{db}.{table}'")))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn with_id(id: &str, value: &Value) -> Value {
+    let mut value = value.clone();
+    if let Some(map) = value.as_object_mut() {
+        map.insert("_id".to_string(), json!(id));
+    }
+    value
+}
+
+fn strip_id(value: &mut Value) {
+    if let Some(map) = value.as_object_mut() {
+        map.remove("_id");
+    }
+}
+
+fn decode_record(
+    keyring: &Keyring,
+    db: &str,
+    schema: Option<&TableSchema>,
+    raw: &Value,
+) -> Result<Value, AppError> {
+    let Some(schema) = schema else {
+        return Ok(raw.clone());
+    };
+    let mut value = raw.clone();
+    if let Some(object) = value.as_object_mut() {
+        for (name, field) in &schema.fields {
+            if !field.encrypted {
+                continue;
+            }
+            let Some(field_value) = object.get_mut(name) else {
+                continue;
+            };
+            let Some(token) = field_value
+                .as_str()
+                .filter(|text| crypto::is_encrypted_str(text))
+            else {
+                continue;
+            };
+            let plaintext = keyring.decrypt_value(db, token).map_err(|err| {
+                AppError::Crypto(format!("falha ao decifrar campo '{name}': {err}"))
+            })?;
+            *field_value = plaintext;
+        }
+    }
+    Ok(value)
+}
+
+fn encode_record(
+    keyring: &Keyring,
+    db: &str,
+    schema: Option<&TableSchema>,
+    plaintext: &Value,
+) -> Result<Value, AppError> {
+    let Some(schema) = schema else {
+        return Ok(plaintext.clone());
+    };
+    let mut value = plaintext.clone();
+    if let Some(object) = value.as_object_mut() {
+        for (name, field) in &schema.fields {
+            if !field.encrypted {
+                continue;
+            }
+            let Some(field_value) = object.get_mut(name) else {
+                continue;
+            };
+            if field_value.is_null() || crypto::is_encrypted_value(field_value) {
+                continue;
+            }
+            *field_value = keyring.encrypt_value(db, field_value).map_err(|err| {
+                AppError::Crypto(format!("falha ao cifrar campo '{name}': {err}"))
+            })?;
+        }
+    }
+    Ok(value)
+}
+
+fn validation_error(errors: Vec<FieldError>) -> AppError {
+    if errors.iter().any(|error| error.unique) {
+        AppError::UniqueViolation(errors)
+    } else {
+        AppError::Validation(errors)
+    }
+}
+
+fn build_unique_index(
+    schema: &TableSchema,
+    records: &BTreeMap<String, Value>,
+    exclude: Option<&str>,
+) -> UniqueIndex {
+    let mut index = UniqueIndex::new();
+    for (id, raw) in records {
+        if exclude == Some(id.as_str()) {
+            continue;
+        }
+        schema::index_unique_fields(&mut index, schema, raw);
+    }
+    index
+}
+
+pub async fn list_records(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    params: ListParams,
+) -> Result<Vec<Value>, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Read).await?;
+    let file = read_table(state, db, table).await?;
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(usize::MAX);
+    let mut records = Vec::new();
+    for (id, raw) in file.records.iter().skip(offset).take(limit) {
+        let value = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
+        records.push(with_id(id, &value));
+    }
+    ops!("list_records"; user = user.username, db = db, table = table, count = records.len());
+    Ok(records)
+}
+
+pub async fn create_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    mut body: Value,
+) -> Result<Value, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Write).await?;
+    if !body.is_object() {
+        return Err(AppError::BadRequest(
+            "registro deve ser um objeto JSON".to_string(),
+        ));
+    }
+    strip_id(&mut body);
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    let id = Uuid::new_v4().to_string();
+    let plaintext = if let Some(schema) = file.schema.clone() {
+        let unique = build_unique_index(&schema, &file.records, None);
+        schema::prepare_record(&schema, &mut body, Mode::Create, None, &unique)
+            .map_err(validation_error)?;
+        body
+    } else {
+        body
+    };
+    let stored = encode_record(&state.keyring, db, file.schema.as_ref(), &plaintext)?;
+    file.records.insert(id.clone(), stored);
+    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    ops!("create_record"; user = user.username, db = db, table = table, id = id);
+    Ok(with_id(&id, &plaintext))
+}
+
+pub async fn get_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    id: &str,
+) -> Result<Value, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Read).await?;
+    let file = read_table(state, db, table).await?;
+    let raw = file
+        .records
+        .get(id)
+        .ok_or_else(|| AppError::NotFound(format!("registro '{id}'")))?;
+    let value = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
+    ops!("get_record"; user = user.username, db = db, table = table, id = id);
+    Ok(with_id(id, &value))
+}
+
+pub async fn replace_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    id: &str,
+    mut body: Value,
+) -> Result<Value, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Write).await?;
+    if !body.is_object() {
+        return Err(AppError::BadRequest(
+            "registro deve ser um objeto JSON".to_string(),
+        ));
+    }
+    strip_id(&mut body);
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    let previous = file
+        .records
+        .get(id)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("registro '{id}'")))?;
+    let plaintext = if let Some(schema) = file.schema.clone() {
+        let unique = build_unique_index(&schema, &file.records, Some(id));
+        schema::prepare_record(&schema, &mut body, Mode::Replace, Some(&previous), &unique)
+            .map_err(validation_error)?;
+        body
+    } else {
+        body
+    };
+    let stored = encode_record(&state.keyring, db, file.schema.as_ref(), &plaintext)?;
+    file.records.insert(id.to_string(), stored);
+    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    ops!("replace_record"; user = user.username, db = db, table = table, id = id);
+    Ok(with_id(id, &plaintext))
+}
+
+pub async fn delete_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    id: &str,
+) -> Result<(), AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Write).await?;
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    if file.records.remove(id).is_none() {
+        return Err(AppError::NotFound(format!("registro '{id}'")));
+    }
+    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    ops!("delete_record"; user = user.username, db = db, table = table, id = id);
+    Ok(())
+}
+
+pub struct QueryOutcome {
+    pub total: usize,
+    pub records: Vec<Value>,
+}
+
+pub async fn query_records(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    request: QueryRequest,
+) -> Result<QueryOutcome, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Read).await?;
+    let file = read_table(state, db, table).await?;
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    for (id, raw) in &file.records {
+        let decoded = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
+        let value = with_id(id, &decoded);
+        if let Some(filter) = &request.filter
+            && !query::matches(filter, &value)?
+        {
+            continue;
+        }
+        entries.push((id.clone(), value));
+    }
+    query::sort_entries(&mut entries, &request.sort, |entry| &entry.1);
+    let total = entries.len();
+    let offset = request.offset.unwrap_or(0);
+    let limit = request.limit.unwrap_or(usize::MAX);
+    let records = entries
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(id, value)| {
+            let value = match &request.fields {
+                Some(fields) => query::project(&value, fields),
+                None => value,
+            };
+            with_id(&id, &value)
+        })
+        .collect::<Vec<_>>();
+    ops!("query_records"; user = user.username, db = db, table = table, total = total, returned = records.len());
+    Ok(QueryOutcome { total, records })
+}
+
+pub async fn get_schema(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+) -> Result<TableSchema, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Read).await?;
+    let file = read_table(state, db, table).await?;
+    let schema = file.schema.ok_or_else(|| {
+        AppError::NotFound(format!("schema da tabela '{db}.{table}'"))
+    })?;
+    ops!("get_schema"; user = user.username, db = db, table = table, fields = schema.fields.len());
+    Ok(schema)
+}
+
+pub async fn set_schema(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    new_schema: TableSchema,
+    force: bool,
+) -> Result<TableSchema, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Write).await?;
+    schema::compile(&new_schema)?;
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    let old = file.schema.take();
+    let mut migrated = BTreeMap::new();
+    let mut unique = UniqueIndex::new();
+    let mut rejected: Vec<RecordError> = Vec::new();
+    for (id, raw) in &file.records {
+        let decoded = decode_record(&state.keyring, db, old.as_ref(), raw)?;
+        let mut candidate = decoded.clone();
+        match schema::prepare_record(&new_schema, &mut candidate, Mode::Migrate, None, &unique) {
+            Ok(()) => {
+                let stored = encode_record(&state.keyring, db, Some(&new_schema), &candidate)?;
+                schema::index_unique_fields(&mut unique, &new_schema, &candidate);
+                migrated.insert(id.clone(), stored);
+            }
+            Err(_) if force => {
+                let stored = encode_record(&state.keyring, db, Some(&new_schema), &decoded)?;
+                schema::index_unique_fields(&mut unique, &new_schema, &decoded);
+                migrated.insert(id.clone(), stored);
+            }
+            Err(fields) => rejected.push(RecordError {
+                id: id.clone(),
+                fields,
+            }),
+        }
+    }
+    if !rejected.is_empty() {
+        tracing::warn!(
+            target: "lunadb::ops",
+            op = "set_schema",
+            user = user.username,
+            db = db,
+            table = table,
+            rejected = rejected.len(),
+            "schema rejeitado pelos registros existentes"
+        );
+        return Err(AppError::SchemaRejected(rejected));
+    }
+    file.schema = Some(new_schema.clone());
+    file.records = migrated;
+    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    ops!("set_schema"; user = user.username, db = db, table = table, force = force, records = file.records.len());
+    Ok(new_schema)
+}
+
+pub async fn delete_schema(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+) -> Result<(), AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Write).await?;
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    let old = file.schema.take().ok_or_else(|| {
+        AppError::NotFound(format!("schema da tabela '{db}.{table}'"))
+    })?;
+    let mut records = BTreeMap::new();
+    for (id, raw) in &file.records {
+        let decoded = decode_record(&state.keyring, db, Some(&old), raw)?;
+        records.insert(id.clone(), decoded);
+    }
+    file.records = records;
+    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    ops!("delete_schema"; user = user.username, db = db, table = table, records = file.records.len());
+    Ok(())
+}
+
+pub async fn validate_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    mut body: Value,
+) -> Result<Value, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Write).await?;
+    if !body.is_object() {
+        return Err(AppError::BadRequest(
+            "registro deve ser um objeto JSON".to_string(),
+        ));
+    }
+    strip_id(&mut body);
+    let file = read_table(state, db, table).await?;
+    let prepared = match file.schema.as_ref() {
+        Some(schema) => {
+            let unique = build_unique_index(schema, &file.records, None);
+            schema::prepare_record(schema, &mut body, Mode::Create, None, &unique)
+                .map_err(validation_error)?;
+            body
+        }
+        None => body,
+    };
+    ops!("validate_record"; user = user.username, db = db, table = table);
+    Ok(prepared)
+}
