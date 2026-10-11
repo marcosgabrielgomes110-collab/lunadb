@@ -6,18 +6,55 @@ use crate::models::{
 };
 use crate::storage;
 use chrono::Utc;
+use std::path::Path;
 use uuid::Uuid;
 
-pub async fn init(paths: &Paths, config: &Config) -> anyhow::Result<()> {
+pub const PASSWORD_HASH_PREFIX: &str = "$argon2";
+
+pub async fn init(
+    paths: &Paths,
+    config: &mut Config,
+    config_path: &Path,
+) -> anyhow::Result<()> {
     paths.ensure().await?;
     ensure_master_key(paths, config).await?;
     ensure_roles(paths).await?;
+    if ensure_hashed_root_password(config, config_path)? {
+        tracing::info!(
+            path = %config_path.display(),
+            "senha do root no config estava em texto claro e foi criptografada (argon2id)"
+        );
+    }
     ensure_root(paths, config).await?;
     migrate_legacy_api_keys(paths).await?;
-    if config.root.password == "changeme" {
+    Ok(())
+}
+
+pub fn ensure_hashed_root_password(
+    config: &mut Config,
+    config_path: &Path,
+) -> anyhow::Result<bool> {
+    let raw = config.root.password.clone();
+    let trimmed = raw.trim();
+    if trimmed.starts_with(PASSWORD_HASH_PREFIX) {
+        argon2::password_hash::phc::PasswordHash::new(trimmed).map_err(|err| {
+            anyhow::anyhow!("root.password do config nao e um hash argon2 valido: {err}")
+        })?;
+        if trimmed != raw {
+            config.root.password = trimmed.to_string();
+            config.save(config_path)?;
+        }
+        return Ok(false);
+    }
+    if raw == "changeme" {
         tracing::warn!("a senha do root ainda e o padrao 'changeme', altere no config");
     }
-    Ok(())
+    config.root.password = auth::hash_password(&raw)?;
+    config.save(config_path)?;
+    if let Err(err) = crypto::set_private_permissions(config_path) {
+        tracing::warn!("falha ao ajustar permissoes do config: {err}");
+    }
+    Ok(true)
 }
 
 async fn migrate_legacy_api_keys(paths: &Paths) -> anyhow::Result<()> {
@@ -91,14 +128,15 @@ async fn ensure_roles(paths: &Paths) -> anyhow::Result<()> {
 
 async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
     let mut users: UsersFile = storage::read_json(&paths.users_file()).await?;
+    let configured_hash = config.root.password.clone();
     match users
         .users
         .iter_mut()
         .find(|user| user.username == config.root.username)
     {
         Some(user) => {
-            if !auth::verify_password(&config.root.password, &user.password_hash) {
-                user.password_hash = auth::hash_password(&config.root.password)?;
+            if user.password_hash != configured_hash {
+                user.password_hash = configured_hash;
                 storage::write_json(&paths.users_file(), &users).await?;
                 tracing::info!(
                     "senha do root '{}' sincronizada com o config",
@@ -110,7 +148,7 @@ async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
             let root = User {
                 id: Uuid::new_v4().to_string(),
                 username: config.root.username.clone(),
-                password_hash: auth::hash_password(&config.root.password)?,
+                password_hash: configured_hash,
                 api_key_hash: None,
                 api_keys: Vec::new(),
                 role: ROLE_ADMIN.to_string(),
@@ -123,4 +161,47 @@ async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hashes_plaintext_password_and_rewrites_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.root.password = "segredo".to_string();
+
+        assert!(ensure_hashed_root_password(&mut config, &path).unwrap());
+        assert!(config.root.password.starts_with(PASSWORD_HASH_PREFIX));
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(PASSWORD_HASH_PREFIX));
+        assert!(!saved.contains("segredo"));
+
+        let before = config.root.password.clone();
+        assert!(!ensure_hashed_root_password(&mut config, &path).unwrap());
+        assert_eq!(config.root.password, before, "idempotente");
+    }
+
+    #[test]
+    fn accepts_existing_hash_and_trims_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let hash = auth::hash_password("x").unwrap();
+        let mut config = Config::default();
+        config.root.password = format!("  {hash}  ");
+        assert!(!ensure_hashed_root_password(&mut config, &path).unwrap());
+        assert_eq!(config.root.password, hash);
+    }
+
+    #[test]
+    fn rejects_invalid_hash_instead_of_hashing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        config.root.password = "$argon2id$isso-nao-e-valido".to_string();
+        assert!(ensure_hashed_root_password(&mut config, &path).is_err());
+    }
 }

@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     let key_override = resolve_key(&cli);
     let config_path = resolve_config_path(&cli);
     let created_config = !config_path.exists();
-    let config = if created_config {
+    let mut config = if created_config {
         let config = config::Config::default();
         config.save(&config_path)?;
         config
@@ -74,13 +74,15 @@ fn main() -> anyhow::Result<()> {
             let _guard = init_logging(&paths, &config)?;
             log_startup(&paths, &config, &config_path, created_config);
             runtime()?.block_on(async {
-                bootstrap::init(&paths, &config).await?;
+                bootstrap::init(&paths, &mut config, &config_path).await?;
                 serve(paths, config, config_path).await
             })
         }
         Command::Init => {
             let _guard = init_logging(&paths, &config)?;
-            runtime()?.block_on(bootstrap::init(&paths, &config))?;
+            runtime()?.block_on(async {
+                bootstrap::init(&paths, &mut config, &config_path).await
+            })?;
             println!("LunaDB inicializado em {}", paths.home.display());
             println!(
                 "root: {} (senha definida em {})",

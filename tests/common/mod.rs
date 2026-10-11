@@ -26,14 +26,12 @@ impl TestServer {
         config.storage.path = dir.path().to_string_lossy().to_string();
         config.root.password = "test-secret".to_string();
         let paths = Paths::from_config(&config);
-        bootstrap::init(&paths, &config).await.expect("bootstrap");
+        let config_path = dir.path().join("config.toml");
+        bootstrap::init(&paths, &mut config, &config_path)
+            .await
+            .expect("bootstrap");
         let keyring = Arc::new(Keyring::from_master([7u8; 32]));
-        let state = AppState::new(
-            paths.clone(),
-            keyring,
-            config,
-            dir.path().join("config.toml"),
-        );
+        let state = AppState::new(paths.clone(), keyring, config, config_path);
         Self {
             router: lunadb::api::router(state),
             dir,

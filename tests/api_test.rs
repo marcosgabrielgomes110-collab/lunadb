@@ -706,6 +706,21 @@ async fn msgpack_legacy_and_migrate() {
 }
 
 #[tokio::test]
+async fn root_password_is_hashed_in_config() {
+    let server = TestServer::spawn().await;
+    let saved = server.disk("config.toml");
+    assert!(
+        saved.contains("$argon2"),
+        "config deveria guardar o hash argon2: {saved}"
+    );
+    assert!(
+        !saved.contains("test-secret"),
+        "texto claro nao deveria sobrar no config"
+    );
+    let _ = server.login_root().await;
+}
+
+#[tokio::test]
 async fn schema_patch_migration() {
     let server = TestServer::spawn().await;
     let root = server.login_root().await;
