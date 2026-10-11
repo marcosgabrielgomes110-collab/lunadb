@@ -206,13 +206,15 @@ pub async fn list_tables(
     let mut entries = tokio::fs::read_dir(state.paths.db_dir(db)).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        let extension = path.extension().and_then(|ext| ext.to_str());
+        if matches!(extension, Some("json") | Some("msgpack"))
             && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
         {
             names.push(stem.to_string());
         }
     }
     names.sort();
+    names.dedup();
     ops!("list_tables"; user = user.username, db = db, count = names.len());
     Ok(names)
 }
@@ -232,8 +234,7 @@ pub async fn create_table(
         schema::compile(schema)?;
     }
     let _guard = state.lock.write().await;
-    let path = state.paths.table_file(db, table);
-    if path.exists() {
+    if state.paths.table_file_existing(db, table).is_some() {
         return Err(AppError::Conflict(format!(
             "tabela '{table}' ja existe no db '{db}'"
         )));
@@ -245,7 +246,7 @@ pub async fn create_table(
         schema,
         records: Default::default(),
     };
-    storage::write_json(&path, &file).await?;
+    write_table(state, db, table, &file).await?;
     ops!("create_table"; user = user.username, db = db, table = table, schema = has_schema);
     Ok(table.to_string())
 }
@@ -261,7 +262,10 @@ pub async fn delete_table(
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Write).await?;
     let _guard = state.lock.write().await;
-    let path = state.paths.table_file(db, table);
+    let path = state
+        .paths
+        .table_file_existing(db, table)
+        .ok_or_else(|| AppError::NotFound(format!("tabela '{db}.{table}'")))?;
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {
             ops!("delete_table"; user = user.username, db = db, table = table);
@@ -275,14 +279,27 @@ pub async fn delete_table(
 }
 
 async fn read_table(state: &AppState, db: &str, table: &str) -> Result<TableFile, AppError> {
-    let path = state.paths.table_file(db, table);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(AppError::NotFound(format!("tabela '{db}.{table}'")))
+    let path = state
+        .paths
+        .table_file_existing(db, table)
+        .ok_or_else(|| AppError::NotFound(format!("tabela '{db}.{table}'")))?;
+    Ok(storage::read_value(&path).await?)
+}
+
+async fn write_table(
+    state: &AppState,
+    db: &str,
+    table: &str,
+    file: &TableFile,
+) -> Result<(), AppError> {
+    let configured = state.paths.table_file(db, table);
+    storage::write_value(&configured, file).await?;
+    for path in state.paths.table_paths(db, table) {
+        if path != configured && path.exists() {
+            let _ = tokio::fs::remove_file(&path).await;
         }
-        Err(err) => Err(err.into()),
     }
+    Ok(())
 }
 
 fn with_id(id: &str, value: &Value) -> Value {
@@ -435,7 +452,7 @@ pub async fn create_record(
     };
     let stored = encode_record(&state.keyring, db, file.schema.as_ref(), &plaintext)?;
     file.records.insert(id.clone(), stored);
-    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    write_table(state, db, table, &file).await?;
     ops!("create_record"; user = user.username, db = db, table = table, id = id);
     Ok(with_id(&id, &plaintext))
 }
@@ -494,7 +511,7 @@ pub async fn replace_record(
     };
     let stored = encode_record(&state.keyring, db, file.schema.as_ref(), &plaintext)?;
     file.records.insert(id.to_string(), stored);
-    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    write_table(state, db, table, &file).await?;
     ops!("replace_record"; user = user.username, db = db, table = table, id = id);
     Ok(with_id(id, &plaintext))
 }
@@ -514,7 +531,7 @@ pub async fn delete_record(
     if file.records.remove(id).is_none() {
         return Err(AppError::NotFound(format!("registro '{id}'")));
     }
-    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    write_table(state, db, table, &file).await?;
     ops!("delete_record"; user = user.username, db = db, table = table, id = id);
     Ok(())
 }
@@ -597,6 +614,41 @@ pub async fn set_schema(
     require_level(state, user, db, Level::Write).await?;
     schema::compile(&new_schema)?;
     let _guard = state.lock.write().await;
+    let outcome = migrate_and_store(state, db, table, new_schema, force, "set_schema", &user.username).await?;
+    ops!("set_schema"; user = user.username, db = db, table = table, force = force, records = outcome.1);
+    Ok(outcome.0)
+}
+
+pub async fn patch_schema(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    patch: schema::SchemaPatch,
+    force: bool,
+) -> Result<TableSchema, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    ensure_db_exists(state, db).await?;
+    require_level(state, user, db, Level::Write).await?;
+    let _guard = state.lock.write().await;
+    let file = read_table(state, db, table).await?;
+    let mut current = file.schema.clone().unwrap_or_default();
+    schema::apply_patch(&mut current, &patch)?;
+    let outcome = migrate_and_store(state, db, table, current, force, "patch_schema", &user.username).await?;
+    ops!("patch_schema"; user = user.username, db = db, table = table, force = force, records = outcome.1);
+    Ok(outcome.0)
+}
+
+async fn migrate_and_store(
+    state: &AppState,
+    db: &str,
+    table: &str,
+    new_schema: TableSchema,
+    force: bool,
+    op: &str,
+    username: &str,
+) -> Result<(TableSchema, usize), AppError> {
     let mut file = read_table(state, db, table).await?;
     let old = file.schema.take();
     let mut migrated = BTreeMap::new();
@@ -625,8 +677,8 @@ pub async fn set_schema(
     if !rejected.is_empty() {
         tracing::warn!(
             target: "lunadb::ops",
-            op = "set_schema",
-            user = user.username,
+            op = op,
+            user = username,
             db = db,
             table = table,
             rejected = rejected.len(),
@@ -636,9 +688,9 @@ pub async fn set_schema(
     }
     file.schema = Some(new_schema.clone());
     file.records = migrated;
-    storage::write_json(&state.paths.table_file(db, table), &file).await?;
-    ops!("set_schema"; user = user.username, db = db, table = table, force = force, records = file.records.len());
-    Ok(new_schema)
+    let records = file.records.len();
+    write_table(state, db, table, &file).await?;
+    Ok((new_schema, records))
 }
 
 pub async fn delete_schema(
@@ -662,7 +714,7 @@ pub async fn delete_schema(
         records.insert(id.clone(), decoded);
     }
     file.records = records;
-    storage::write_json(&state.paths.table_file(db, table), &file).await?;
+    write_table(state, db, table, &file).await?;
     ops!("delete_schema"; user = user.username, db = db, table = table, records = file.records.len());
     Ok(())
 }
@@ -695,4 +747,52 @@ pub async fn validate_record(
     };
     ops!("validate_record"; user = user.username, db = db, table = table);
     Ok(prepared)
+}
+
+#[derive(Debug, Default)]
+pub struct MigrateReport {
+    pub converted: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+pub async fn migrate_tables(
+    paths: &crate::config::Paths,
+    target: crate::storage::Format,
+) -> anyhow::Result<MigrateReport> {
+    let dbs: DbsFile = storage::read_json(&paths.dbs_registry()).await?;
+    let mut report = MigrateReport::default();
+    for meta in &dbs.dbs {
+        let dir = paths.db_dir(&meta.name);
+        if !dir.exists() {
+            continue;
+        }
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let extension = path.extension().and_then(|ext| ext.to_str());
+            if !matches!(extension, Some("json") | Some("msgpack")) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let label = format!("{}.{}", meta.name, stem);
+            if storage::format_of(&path) == target {
+                report.skipped.push(label);
+                continue;
+            }
+            let value: Value = storage::read_value(&path).await?;
+            let target_path = dir.join(format!("{stem}.{}", target.extension()));
+            storage::write_value(&target_path, &value).await?;
+            tokio::fs::remove_file(&path).await?;
+            tracing::info!(
+                target: "lunadb::ops",
+                op = "migrate_table",
+                table = %label,
+                format = target.extension(),
+            );
+            report.converted.push(label);
+        }
+    }
+    Ok(report)
 }

@@ -191,6 +191,27 @@ class QueryResult:
 
 
 @dataclass(frozen=True)
+class ApiKey:
+    id: str
+    name: str
+    prefix: str
+    created_at: str
+    last_used_at: str | None
+    revoked: bool
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ApiKey:
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            prefix=data.get("prefix", ""),
+            created_at=data["created_at"],
+            last_used_at=data.get("last_used_at"),
+            revoked=bool(data.get("revoked", False)),
+        )
+
+
+@dataclass(frozen=True)
 class User:
     id: str
     username: str

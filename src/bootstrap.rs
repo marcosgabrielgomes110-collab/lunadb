@@ -2,7 +2,7 @@ use crate::auth;
 use crate::config::{Config, Paths};
 use crate::crypto;
 use crate::models::{
-    Grant, Level, Role, User, UsersFile, RolesFile, ROLE_ADMIN, ROLE_USER,
+    ApiKey, Grant, Level, Role, User, UsersFile, RolesFile, ROLE_ADMIN, ROLE_USER,
 };
 use crate::storage;
 use chrono::Utc;
@@ -13,8 +13,34 @@ pub async fn init(paths: &Paths, config: &Config) -> anyhow::Result<()> {
     ensure_master_key(paths, config).await?;
     ensure_roles(paths).await?;
     ensure_root(paths, config).await?;
+    migrate_legacy_api_keys(paths).await?;
     if config.root.password == "changeme" {
         tracing::warn!("a senha do root ainda e o padrao 'changeme', altere no config");
+    }
+    Ok(())
+}
+
+async fn migrate_legacy_api_keys(paths: &Paths) -> anyhow::Result<()> {
+    let mut users: UsersFile = storage::read_json(&paths.users_file()).await?;
+    let mut migrated = 0;
+    for user in users.users.iter_mut() {
+        let Some(hash) = user.api_key_hash.take() else {
+            continue;
+        };
+        user.api_keys.push(ApiKey {
+            id: Uuid::new_v4().to_string(),
+            name: "legacy".to_string(),
+            key_hash: Some(hash),
+            prefix: "legacy".to_string(),
+            created_at: user.created_at,
+            last_used_at: None,
+            revoked_at: None,
+        });
+        migrated += 1;
+    }
+    if migrated > 0 {
+        storage::write_json(&paths.users_file(), &users).await?;
+        tracing::info!("{migrated} api key(s) legada(s) migrada(s) para o novo formato");
     }
     Ok(())
 }
@@ -86,6 +112,7 @@ async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
                 username: config.root.username.clone(),
                 password_hash: auth::hash_password(&config.root.password)?,
                 api_key_hash: None,
+                api_keys: Vec::new(),
                 role: ROLE_ADMIN.to_string(),
                 grants: Vec::new(),
                 created_at: Utc::now(),

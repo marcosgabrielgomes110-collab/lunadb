@@ -93,6 +93,88 @@ pub struct TableSchema {
     pub unique: Vec<UniqueKey>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaPatch {
+    #[serde(default)]
+    pub add: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+    #[serde(default)]
+    pub update: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub unique_add: Vec<UniqueKey>,
+    #[serde(default)]
+    pub unique_remove: Vec<UniqueKey>,
+    #[serde(default)]
+    pub strict: Option<bool>,
+}
+
+fn patch_error(message: impl Into<String>) -> AppError {
+    AppError::BadRequest(format!("schema patch: {}", message.into()))
+}
+
+fn merge_json(base: &mut Value, patch: &Value) {
+    match (base, patch) {
+        (Value::Object(base_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                base_map.insert(key.clone(), value.clone());
+            }
+        }
+        (base, patch) => *base = patch.clone(),
+    }
+}
+
+pub fn apply_patch(schema: &mut TableSchema, patch: &SchemaPatch) -> Result<(), AppError> {
+    for name in &patch.remove {
+        if schema.fields.remove(name).is_none() {
+            return Err(patch_error(format!("campo '{name}' nao existe")));
+        }
+    }
+    for (name, changes) in &patch.update {
+        let Some(existing) = schema.fields.get_mut(name) else {
+            return Err(patch_error(format!("campo '{name}' nao existe (use add)")));
+        };
+        let mut base = serde_json::to_value(&*existing)?;
+        merge_json(&mut base, changes);
+        let updated: FieldSchema = serde_json::from_value(base)
+            .map_err(|err| patch_error(format!("campo '{name}' invalido: {err}")))?;
+        *existing = updated;
+    }
+    for (name, value) in &patch.add {
+        if schema.fields.contains_key(name) {
+            return Err(patch_error(format!(
+                "campo '{name}' ja existe (use update)"
+            )));
+        }
+        let field: FieldSchema = serde_json::from_value(value.clone())
+            .map_err(|err| patch_error(format!("campo '{name}' invalido: {err}")))?;
+        schema.fields.insert(name.clone(), field);
+    }
+    for key in &patch.unique_add {
+        let label = key.label();
+        if schema.unique.iter().any(|existing| existing.label() == label) {
+            return Err(patch_error(format!("unique '{label}' ja existe")));
+        }
+        schema.unique.push(key.clone());
+    }
+    for key in &patch.unique_remove {
+        let label = key.label();
+        let Some(index) = schema
+            .unique
+            .iter()
+            .position(|existing| existing.label() == label)
+        else {
+            return Err(patch_error(format!("unique '{label}' nao existe")));
+        };
+        schema.unique.remove(index);
+    }
+    if let Some(strict) = patch.strict {
+        schema.strict = strict;
+    }
+    compile(schema)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Create,
@@ -600,5 +682,326 @@ pub fn index_unique_fields(index: &mut UniqueIndex, schema: &TableSchema, record
                 index.add_compound(&fields, combo);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn table_schema(value: Value) -> TableSchema {
+        serde_json::from_value(value).expect("schema valido")
+    }
+
+    fn base_schema() -> TableSchema {
+        table_schema(json!({
+            "unique": ["cpf", ["tenant", "email"]],
+            "fields": {
+                "tenant": {"type": "string"},
+                "email": {"type": "string"},
+                "cpf": {"type": "string", "nullable": true},
+                "nome": {"type": "string", "required": true},
+                "idade": {"type": "int", "min": 0, "max": 150},
+                "ativo": {"type": "bool", "default": true},
+                "senha": {"type": "string", "encrypted": true},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "endereco": {"type": "object", "fields": {"cidade": {"type": "string", "required": true}}},
+                "criado": {"type": "datetime", "auto": "created_at"},
+                "atualizado": {"type": "datetime", "auto": "updated_at"}
+            }
+        }))
+    }
+
+    #[test]
+    fn compile_accepts_valid_schema_and_labels() {
+        let schema = base_schema();
+        assert!(compile(&schema).is_ok());
+        assert_eq!(schema.unique[0].label(), "cpf");
+        assert_eq!(schema.unique[1].label(), "tenant+email");
+    }
+
+    #[test]
+    fn compile_rejects_bad_unique_keys() {
+        let unknown = table_schema(json!({"unique": ["nope"], "fields": {}}));
+        assert!(compile(&unknown).is_err());
+        let encrypted = table_schema(json!({
+            "unique": ["senha"],
+            "fields": {"senha": {"type": "string", "encrypted": true}}
+        }));
+        assert!(compile(&encrypted).is_err());
+        let repeated = table_schema(json!({
+            "unique": [["a", "a"]],
+            "fields": {"a": {"type": "string"}}
+        }));
+        assert!(compile(&repeated).is_err());
+        let duplicated = table_schema(json!({
+            "unique": ["a", ["a"]],
+            "fields": {"a": {"type": "string"}}
+        }));
+        assert!(compile(&duplicated).is_err());
+    }
+
+    #[test]
+    fn compile_rejects_bad_field_constraints() {
+        let pattern = table_schema(json!({
+            "fields": {"a": {"type": "string", "pattern": "(unclosed"}}
+        }));
+        assert!(compile(&pattern).is_err());
+        let range = table_schema(json!({
+            "fields": {"a": {"type": "int", "min": 10, "max": 1}}
+        }));
+        assert!(compile(&range).is_err());
+        let nested_encrypted = table_schema(json!({
+            "fields": {"a": {"type": "object", "fields": {"b": {"type": "string", "encrypted": true}}}}
+        }));
+        assert!(compile(&nested_encrypted).is_err());
+        let bad_default = table_schema(json!({
+            "fields": {"a": {"type": "int", "default": "texto"}}
+        }));
+        assert!(compile(&bad_default).is_err());
+    }
+
+    #[test]
+    fn prepare_applies_defaults_auto_and_required() {
+        let schema = base_schema();
+        let mut record = json!({"nome": "Ana", "senha": "s", "tenant": "t", "email": "a@x"});
+        prepare_record(
+            &schema,
+            &mut record,
+            Mode::Create,
+            None,
+            &UniqueIndex::new(),
+        )
+        .unwrap();
+        assert_eq!(record["ativo"], json!(true));
+        assert!(record["criado"].is_string());
+        assert!(record["atualizado"].is_string());
+
+        let missing = prepare_record(
+            &schema,
+            &mut json!({}),
+            Mode::Create,
+            None,
+            &UniqueIndex::new(),
+        )
+        .unwrap_err();
+        assert!(missing.iter().any(|error| error.field == "nome"));
+    }
+
+    #[test]
+    fn prepare_rejects_wrong_types_and_strict_fields() {
+        let schema = base_schema();
+        let mut record = json!({
+            "nome": "Ana",
+            "idade": 200,
+            "tags": [1, 2],
+            "endereco": {},
+            "extra": true
+        });
+        let errors = prepare_record(
+            &schema,
+            &mut record,
+            Mode::Create,
+            None,
+            &UniqueIndex::new(),
+        )
+        .unwrap_err();
+        let fields = errors.iter().map(|error| error.field.as_str()).collect::<Vec<_>>();
+        assert!(fields.contains(&"idade"));
+        assert!(fields.contains(&"tags[0]"));
+        assert!(fields.contains(&"endereco.cidade"));
+
+        let strict = table_schema(json!({
+            "strict": true,
+            "fields": {"nome": {"type": "string"}}
+        }));
+        let errors = prepare_record(
+            &strict,
+            &mut json!({"nome": "Ana", "extra": 1}),
+            Mode::Create,
+            None,
+            &UniqueIndex::new(),
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|error| error.field == "extra"));
+    }
+
+    #[test]
+    fn unique_single_compound_and_nulls() {
+        let schema = base_schema();
+        let mut index = UniqueIndex::new();
+        index_unique_fields(
+            &mut index,
+            &schema,
+            &json!({"cpf": "111", "tenant": "t1", "email": "a@x"}),
+        );
+        assert!(index.has_compound(
+            &["cpf".to_string()],
+            &canonical(&json!(["111"]))
+        ));
+        let fields = vec!["tenant".to_string(), "email".to_string()];
+        assert!(index.has_compound(&fields, &canonical(&json!(["t1", "a@x"]))));
+
+        let errors = prepare_record(
+            &schema,
+            &mut json!({"nome": "B", "cpf": "111"}),
+            Mode::Create,
+            None,
+            &index,
+        )
+        .unwrap_err();
+        assert!(errors.iter().any(|error| error.unique && error.field == "cpf"));
+
+        let errors = prepare_record(
+            &schema,
+            &mut json!({"nome": "B", "cpf": "222", "tenant": "t1", "email": "a@x"}),
+            Mode::Create,
+            None,
+            &index,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.unique && error.field == "tenant+email")
+        );
+
+        let errors = prepare_record(
+            &schema,
+            &mut json!({"nome": "B", "cpf": null, "tenant": "t1", "email": "a@x"}),
+            Mode::Create,
+            None,
+            &index,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.field != "cpf"),
+            "cpf null nao deveria violar unique: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.unique && error.field == "tenant+email")
+        );
+
+        assert!(
+            prepare_record(
+                &schema,
+                &mut json!({"nome": "B", "cpf": null, "tenant": "t2", "email": "b@x"}),
+                Mode::Create,
+                None,
+                &index,
+            )
+            .is_ok(),
+            "componentes nulos nao participam do unique"
+        );
+    }
+
+    #[test]
+    fn replace_preserves_created_at() {
+        let schema = base_schema();
+        let mut created = json!({"nome": "Ana"});
+        prepare_record(
+            &schema,
+            &mut created,
+            Mode::Create,
+            None,
+            &UniqueIndex::new(),
+        )
+        .unwrap();
+        let created_at = created["criado"].clone();
+
+        let mut replaced = json!({"nome": "Ana Maria"});
+        prepare_record(
+            &schema,
+            &mut replaced,
+            Mode::Replace,
+            Some(&created),
+            &UniqueIndex::new(),
+        )
+        .unwrap();
+        assert_eq!(replaced["criado"], created_at);
+    }
+
+    fn patch(value: Value) -> SchemaPatch {
+        serde_json::from_value(value).expect("patch valido")
+    }
+
+    #[test]
+    fn patch_creates_schema_from_scratch() {
+        let mut schema = TableSchema::default();
+        let operation = patch(json!({
+            "add": {"nome": {"type": "string", "required": true}},
+            "unique_add": ["nome"],
+            "strict": true
+        }));
+        apply_patch(&mut schema, &operation).unwrap();
+        assert!(schema.strict);
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields["nome"].field_type, FieldType::String);
+        assert_eq!(schema.unique[0].label(), "nome");
+    }
+
+    #[test]
+    fn patch_rejects_invalid_operations() {
+        let mut schema = base_schema();
+        let add_existing = patch(json!({"add": {"nome": {"type": "string"}}}));
+        assert!(apply_patch(&mut schema, &add_existing).is_err());
+
+        let remove_missing = patch(json!({"remove": ["nao_existe"]}));
+        assert!(apply_patch(&mut schema, &remove_missing).is_err());
+
+        let update_missing = patch(json!({"update": {"nao_existe": {"required": true}}}));
+        assert!(apply_patch(&mut schema, &update_missing).is_err());
+
+        let unique_exists = patch(json!({"unique_add": ["cpf"]}));
+        assert!(apply_patch(&mut schema, &unique_exists).is_err());
+
+        let unique_missing = patch(json!({"unique_remove": ["nao_existe"]}));
+        assert!(apply_patch(&mut schema, &unique_missing).is_err());
+
+        let bad_field = patch(json!({"add": {"x": {"type": "inexistente"}}}));
+        assert!(apply_patch(&mut schema, &bad_field).is_err());
+
+        let unknown_unique_field = patch(json!({"add": {"y": {"type": "string"}}, "unique_add": ["nao_declarado"]}));
+        assert!(apply_patch(&mut schema, &unknown_unique_field).is_err());
+    }
+
+    #[test]
+    fn patch_update_merges_and_clears_properties() {
+        let mut schema = base_schema();
+        let operation = patch(json!({
+            "update": {
+                "idade": {"min": 5, "max": null},
+                "cpf": {"required": true},
+                "nome": {"min_length": 3, "max_length": 40}
+            }
+        }));
+        apply_patch(&mut schema, &operation).unwrap();
+        assert_eq!(schema.fields["idade"].min, Some(5.0));
+        assert_eq!(schema.fields["idade"].max, None);
+        assert!(schema.fields["cpf"].required);
+        assert_eq!(schema.fields["nome"].min_length, Some(3));
+        assert_eq!(schema.fields["nome"].max_length, Some(40));
+
+        let bad_type = patch(json!({"update": {"idade": {"type": "nao_existe"}}}));
+        assert!(apply_patch(&mut schema, &bad_type).is_err());
+    }
+
+    #[test]
+    fn patch_remove_field_and_unique() {
+        let mut schema = base_schema();
+        let operation = patch(json!({
+            "remove": ["tags", "endereco"],
+            "unique_remove": ["cpf"]
+        }));
+        apply_patch(&mut schema, &operation).unwrap();
+        assert!(!schema.fields.contains_key("tags"));
+        assert!(!schema.fields.contains_key("endereco"));
+        assert_eq!(schema.unique.len(), 1);
+        assert_eq!(schema.unique[0].label(), "tenant+email");
     }
 }

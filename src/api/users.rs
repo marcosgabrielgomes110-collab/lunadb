@@ -80,6 +80,7 @@ pub async fn create(
         username: req.username,
         password_hash: auth::hash_password(&req.password)?,
         api_key_hash: None,
+        api_keys: Vec::new(),
         role: req.role,
         grants: req.grants,
         created_at: Utc::now(),

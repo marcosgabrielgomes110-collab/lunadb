@@ -7,10 +7,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Union
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 from .errors import LunaConnectionError, LunaError, error_from_status
-from .models import DbMeta, Grant, Level, QueryResult, Role, Sort, TableSchema, User
+from .models import (
+    ApiKey,
+    DbMeta,
+    Field,
+    Grant,
+    Level,
+    QueryResult,
+    Role,
+    Sort,
+    TableSchema,
+    User,
+)
 
 DEFAULT_URL = "http://127.0.0.1:7700"
 DEFAULT_CONFIG_PATH = "~/.lunadb/config.toml"
@@ -29,6 +40,12 @@ def _normalize_grants(grants: Iterable[GrantLike]) -> list[dict[str, str]]:
             db, level = grant
             normalized.append(Grant(db=db, level=Level(level)).to_dict())
     return normalized
+
+
+def _unique_key(key: Union[str, Sequence[str]]) -> Union[str, list[str]]:
+    if isinstance(key, str):
+        return key
+    return list(key)
 
 
 def _normalize_schema(schema: Union[TableSchema, Mapping[str, Any]]) -> dict[str, Any]:
@@ -113,6 +130,35 @@ class LunaClient:
         data = self._request("POST", "/auth/rotate-key")
         self.api_key = data["api_key"]
         return self.api_key
+
+    def list_api_keys(self, user_id: Optional[str] = None) -> list[ApiKey]:
+        path = (
+            f"/users/{urllib.parse.quote(user_id)}/api-keys"
+            if user_id
+            else "/auth/api-keys"
+        )
+        return [ApiKey.from_dict(item) for item in self._request("GET", path)]
+
+    def create_api_key(
+        self, user_id: Optional[str] = None, name: Optional[str] = None
+    ) -> tuple[ApiKey, str]:
+        path = (
+            f"/users/{urllib.parse.quote(user_id)}/api-keys"
+            if user_id
+            else "/auth/api-keys"
+        )
+        data = self._request("POST", path, body={"name": name})
+        return ApiKey.from_dict(data["api_key"]), data["key"]
+
+    def revoke_api_key(
+        self, key_id: str, user_id: Optional[str] = None
+    ) -> ApiKey:
+        path = (
+            f"/users/{urllib.parse.quote(user_id)}/api-keys/{urllib.parse.quote(key_id)}"
+            if user_id
+            else f"/auth/api-keys/{urllib.parse.quote(key_id)}"
+        )
+        return ApiKey.from_dict(self._request("DELETE", path))
 
     def me(self) -> User:
         return User.from_dict(self._request("GET", "/me"))
@@ -216,6 +262,65 @@ class LunaClient:
 
     def delete_schema(self, db: str, table: str) -> None:
         self._request("DELETE", self._schema_path(db, table))
+
+    def patch_schema(
+        self,
+        db: str,
+        table: str,
+        patch: Mapping[str, Any],
+        force: bool = False,
+    ) -> TableSchema:
+        data = self._request(
+            "PATCH",
+            self._schema_path(db, table),
+            body=dict(patch),
+            params={"force": "true" if force else None},
+        )
+        return TableSchema.from_dict(data)
+
+    def add_schema_fields(
+        self,
+        db: str,
+        table: str,
+        fields: Mapping[str, Union[Field, Mapping[str, Any]]],
+        force: bool = False,
+    ) -> TableSchema:
+        normalized = {
+            name: field.to_dict() if isinstance(field, Field) else dict(field)
+            for name, field in fields.items()
+        }
+        return self.patch_schema(db, table, {"add": normalized}, force=force)
+
+    def update_schema_field(
+        self,
+        db: str,
+        table: str,
+        field: str,
+        changes: Mapping[str, Any],
+        force: bool = False,
+    ) -> TableSchema:
+        return self.patch_schema(
+            db, table, {"update": {field: dict(changes)}}, force=force
+        )
+
+    def remove_schema_fields(
+        self, db: str, table: str, *fields: str, force: bool = False
+    ) -> TableSchema:
+        return self.patch_schema(db, table, {"remove": list(fields)}, force=force)
+
+    def add_unique_key(
+        self, db: str, table: str, key: Union[str, Sequence[str]], force: bool = False
+    ) -> TableSchema:
+        return self.patch_schema(
+            db, table, {"unique_add": [_unique_key(key)]}, force=force
+        )
+
+    def remove_unique_key(
+        self, db: str, table: str, key: Union[str, Sequence[str]], force: bool = False
+    ) -> TableSchema:
+        return self.patch_schema(
+            db, table, {"unique_remove": [_unique_key(key)]}, force=force
+        )
 
     def validate_record(
         self, db: str, table: str, record: Mapping[str, Any]

@@ -15,9 +15,13 @@ hex = "0.4.3"
 hkdf = "0.13"
 rand = "0.10.3"
 regex = "1"
+rmp-serde = "1"
+rpassword = "7.5.4"
+rustyline = "18.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+shlex = "2.0.1"
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.8"
@@ -25,4 +29,9 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1.44"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ureq = "3"
 uuid = { version = "1.28.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

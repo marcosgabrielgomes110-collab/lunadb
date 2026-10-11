@@ -22,6 +22,7 @@ pub struct ServerConfig {
 #[serde(default)]
 pub struct StorageConfig {
     pub path: String,
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +74,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             path: "~/.lunadb".to_string(),
+            format: "msgpack".to_string(),
         }
     }
 }
@@ -108,6 +110,7 @@ pub struct Paths {
     pub meta: PathBuf,
     pub dbs: PathBuf,
     pub infra: PathBuf,
+    pub format: String,
 }
 
 impl Paths {
@@ -118,6 +121,7 @@ impl Paths {
             dbs: home.join("dbs"),
             infra: home.join("infra"),
             home,
+            format: config.storage.format.clone(),
         }
     }
 
@@ -157,7 +161,26 @@ impl Paths {
     }
 
     pub fn table_file(&self, db: &str, table: &str) -> PathBuf {
-        self.db_dir(db).join(format!("{table}.json"))
+        let extension = crate::storage::Format::from_name(&self.format).extension();
+        self.db_dir(db).join(format!("{table}.{extension}"))
+    }
+
+    pub fn table_paths(&self, db: &str, table: &str) -> Vec<PathBuf> {
+        let configured = self.table_file(db, table);
+        let mut paths = vec![configured.clone()];
+        for format in [crate::storage::Format::Msgpack, crate::storage::Format::Json] {
+            let candidate = self
+                .db_dir(db)
+                .join(format!("{table}.{}", format.extension()));
+            if candidate != configured {
+                paths.push(candidate);
+            }
+        }
+        paths
+    }
+
+    pub fn table_file_existing(&self, db: &str, table: &str) -> Option<PathBuf> {
+        self.table_paths(db, table).into_iter().find(|path| path.exists())
     }
 }
 

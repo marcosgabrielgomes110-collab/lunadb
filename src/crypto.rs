@@ -19,6 +19,10 @@ pub struct Keyring {
 }
 
 impl Keyring {
+    pub fn from_master(master: [u8; 32]) -> Self {
+        Self { master }
+    }
+
     pub fn load(paths: &Paths, config: &Config) -> anyhow::Result<Self> {
         if let Ok(value) = std::env::var("LUNADB_MASTER_KEY") {
             let master = parse_master_key(value.trim()).context("LUNADB_MASTER_KEY invalida")?;
@@ -140,4 +144,65 @@ pub fn has_private_permissions(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub fn has_private_permissions(_path: &Path) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let keyring = Keyring::from_master([1u8; 32]);
+        let value = json!({"segredo": "valor", "numero": 42, "lista": [1, 2, 3]});
+        let token = keyring.encrypt_value("app", &value).unwrap();
+        let token_str = token.as_str().unwrap();
+        assert!(token_str.starts_with(ENC_PREFIX));
+        assert!(is_encrypted_str(token_str));
+        assert!(is_encrypted_value(&token));
+        let decrypted = keyring.decrypt_value("app", token_str).unwrap();
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_fails() {
+        let token = Keyring::from_master([1u8; 32])
+            .encrypt_value("app", &json!("segredo"))
+            .unwrap();
+        let token = token.as_str().unwrap().to_string();
+        let other = Keyring::from_master([2u8; 32]);
+        assert!(other.decrypt_value("app", &token).is_err());
+    }
+
+    #[test]
+    fn keys_are_isolated_per_db() {
+        let keyring = Keyring::from_master([3u8; 32]);
+        assert_ne!(keyring.db_key("a"), keyring.db_key("b"));
+        let token = keyring.encrypt_value("a", &json!("x")).unwrap();
+        let token = token.as_str().unwrap().to_string();
+        assert!(keyring.decrypt_value("b", &token).is_err());
+        assert!(keyring.decrypt_value("a", &token).is_ok());
+    }
+
+    #[test]
+    fn nonce_is_unique_per_encryption() {
+        let keyring = Keyring::from_master([4u8; 32]);
+        let first = keyring.encrypt_value("app", &json!("x")).unwrap();
+        let second = keyring.encrypt_value("app", &json!("x")).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn invalid_token_errors() {
+        let keyring = Keyring::from_master([5u8; 32]);
+        assert!(keyring.decrypt_value("app", "texto-claro").is_err());
+        assert!(keyring.decrypt_value("app", "enc:v1:bm90YQ==").is_err());
+    }
+
+    #[test]
+    fn parse_master_key_validates_length() {
+        assert!(parse_master_key(&"ab".repeat(32)).is_ok());
+        assert!(parse_master_key("abc").is_err());
+        assert!(parse_master_key(&"zz".repeat(32)).is_err());
+    }
 }

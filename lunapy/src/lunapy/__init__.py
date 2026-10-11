@@ -13,6 +13,7 @@ from .errors import (
     LunaValidationError,
 )
 from .models import (
+    ApiKey,
     AutoField,
     DbMeta,
     Field,
@@ -42,6 +43,7 @@ __all__ = [
     "LunaUniqueViolationError",
     "LunaSchemaRejectedError",
     "AutoField",
+    "ApiKey",
     "DbMeta",
     "Field",
     "FieldType",

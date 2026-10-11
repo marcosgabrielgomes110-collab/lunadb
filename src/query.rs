@@ -183,7 +183,17 @@ fn apply_op(path: &str, value: Option<&Value>, op: &str, operand: &Value) -> Res
                 .ok_or_else(|| filter_error(format!("campo '{path}': $nin espera array")))?;
             Ok(!list.iter().any(|item| value == Some(item)))
         }
-        "$contains" | "$starts_with" | "$ends_with" => {
+        "$contains" => match value {
+            Some(Value::String(text)) => {
+                let needle = operand.as_str().ok_or_else(|| {
+                    filter_error(format!("campo '{path}': $contains espera string"))
+                })?;
+                Ok(text.contains(needle))
+            }
+            Some(Value::Array(items)) => Ok(items.iter().any(|item| item == operand)),
+            _ => Ok(false),
+        },
+        "$starts_with" | "$ends_with" => {
             let Some(Value::String(text)) = value else {
                 return Ok(false);
             };
@@ -191,7 +201,6 @@ fn apply_op(path: &str, value: Option<&Value>, op: &str, operand: &Value) -> Res
                 filter_error(format!("campo '{path}': {op} espera string"))
             })?;
             Ok(match op {
-                "$contains" => text.contains(needle),
                 "$starts_with" => text.starts_with(needle),
                 _ => text.ends_with(needle),
             })
@@ -314,5 +323,138 @@ fn set_path(output: &mut Map<String, Value>, path: &str, value: Value) {
                 set_path(map, rest, value);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record() -> Value {
+        json!({
+            "nome": "Ana",
+            "idade": 30,
+            "ativo": true,
+            "tags": ["dev", "vip"],
+            "endereco": {"cidade": "SP", "cep": "01000-000"},
+            "nota": null
+        })
+    }
+
+    #[test]
+    fn equality_and_comparison() {
+        let record = record();
+        assert!(matches(&json!({"nome": "Ana"}), &record).unwrap());
+        assert!(!matches(&json!({"nome": "Bia"}), &record).unwrap());
+        assert!(matches(&json!({"idade": {"$gt": 18}}), &record).unwrap());
+        assert!(!matches(&json!({"idade": {"$gt": 30}}), &record).unwrap());
+        assert!(matches(&json!({"idade": {"$gte": 30}}), &record).unwrap());
+        assert!(matches(&json!({"idade": {"$lt": 40, "$gte": 30}}), &record).unwrap());
+        assert!(matches(&json!({"idade": {"$ne": 31}}), &record).unwrap());
+    }
+
+    #[test]
+    fn membership_and_string_ops() {
+        let record = record();
+        assert!(matches(&json!({"idade": {"$in": [30, 40]}}), &record).unwrap());
+        assert!(matches(&json!({"idade": {"$nin": [1, 2]}}), &record).unwrap());
+        assert!(matches(&json!({"nome": {"$contains": "na"}}), &record).unwrap());
+        assert!(matches(&json!({"tags": {"$contains": "vip"}}), &record).unwrap());
+        assert!(!matches(&json!({"tags": {"$contains": "adm"}}), &record).unwrap());
+        assert!(matches(&json!({"nome": {"$starts_with": "A"}}), &record).unwrap());
+        assert!(matches(&json!({"nome": {"$ends_with": "na"}}), &record).unwrap());
+        assert!(matches(&json!({"nome": {"$regex": "^A.a$"}}), &record).unwrap());
+        assert!(!matches(&json!({"nome": {"$regex": "^B"}}), &record).unwrap());
+    }
+
+    #[test]
+    fn exists_and_null() {
+        let record = record();
+        assert!(matches(&json!({"nota": {"$exists": false}}), &record).unwrap());
+        assert!(matches(&json!({"inexistente": {"$exists": false}}), &record).unwrap());
+        assert!(matches(&json!({"nome": {"$exists": true}}), &record).unwrap());
+        assert!(!matches(&json!({"nota": {"$exists": true}}), &record).unwrap());
+    }
+
+    #[test]
+    fn logical_operators_and_paths() {
+        let record = record();
+        assert!(
+            matches(
+                &json!({"$or": [{"nome": "Bia"}, {"idade": {"$gte": 18}}]}),
+                &record
+            )
+            .unwrap()
+        );
+        assert!(
+            matches(
+                &json!({"$and": [{"ativo": true}, {"$not": {"nome": "Bia"}}]}),
+                &record
+            )
+            .unwrap()
+        );
+        assert!(matches(&json!({"endereco.cidade": "SP"}), &record).unwrap());
+        assert!(!matches(&json!({"endereco.cidade": "RJ"}), &record).unwrap());
+        assert!(matches(&json!({"tags.1": "vip"}), &record).unwrap());
+    }
+
+    #[test]
+    fn invalid_filters_error() {
+        let record = record();
+        assert!(matches(&json!({"idade": {"$foo": 1}}), &record).is_err());
+        assert!(matches(&json!({"$or": "nao-array"}), &record).is_err());
+        assert!(matches(&json!({"idade": {"$in": "nao-array"}}), &record).is_err());
+        assert!(matches(&json!("nao-objeto"), &record).is_err());
+    }
+
+    #[test]
+    fn sort_asc_desc_and_nulls_last() {
+        let mut entries = vec![
+            ("a".to_string(), json!({"idade": 30})),
+            ("b".to_string(), json!({"idade": 20})),
+            ("c".to_string(), json!({})),
+            ("d".to_string(), json!({"idade": 25})),
+        ];
+        let asc = vec![SortSpec {
+            field: "idade".to_string(),
+            dir: SortDir::Asc,
+        }];
+        sort_entries(&mut entries, &asc, |entry| &entry.1);
+        assert_eq!(
+            entries.iter().map(|entry| entry.0.as_str()).collect::<Vec<_>>(),
+            vec!["b", "d", "a", "c"]
+        );
+        let desc = vec![SortSpec {
+            field: "idade".to_string(),
+            dir: SortDir::Desc,
+        }];
+        sort_entries(&mut entries, &desc, |entry| &entry.1);
+        assert_eq!(
+            entries.iter().map(|entry| entry.0.as_str()).collect::<Vec<_>>(),
+            vec!["a", "d", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn sort_deserializes_strings_and_objects() {
+        let request: QueryRequest =
+            serde_json::from_value(json!({"sort": ["nome", "-idade"]})).unwrap();
+        assert_eq!(request.sort[0].field, "nome");
+        assert_eq!(request.sort[0].dir, SortDir::Asc);
+        assert_eq!(request.sort[1].field, "idade");
+        assert_eq!(request.sort[1].dir, SortDir::Desc);
+        let request: QueryRequest = serde_json::from_value(
+            json!({"sort": [{"field": "nome", "direction": "desc"}]}),
+        )
+        .unwrap();
+        assert_eq!(request.sort[0].dir, SortDir::Desc);
+    }
+
+    #[test]
+    fn projection_nested_and_id() {
+        let record = record();
+        let projected = project(&record, &["nome".to_string(), "endereco.cidade".to_string(), "_id".to_string()]);
+        assert_eq!(projected, json!({"nome": "Ana", "endereco": {"cidade": "SP"}}));
     }
 }

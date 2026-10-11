@@ -33,8 +33,8 @@ pub async fn login(
         tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, "credenciais invalidas");
         return Err(AppError::Unauthorized);
     }
-    let api_key = auth::generate_api_key();
-    user.api_key_hash = Some(auth::hash_api_key(&api_key));
+    user.api_key_hash = None;
+    let api_key = auth::rotate_named_key(user, auth::LOGIN_KEY_NAME, chrono::Utc::now());
     let public = UserPublic::from(&*user);
     storage::write_json(&state.paths.users_file(), &users).await?;
     tracing::info!(target: "lunadb::ops", op = %"login", user = %req.username, "login ok");
@@ -52,8 +52,8 @@ pub async fn rotate_key(
         .iter_mut()
         .find(|candidate| candidate.id == user.0.id)
         .ok_or(AppError::Unauthorized)?;
-    let api_key = auth::generate_api_key();
-    target.api_key_hash = Some(auth::hash_api_key(&api_key));
+    target.api_key_hash = None;
+    let api_key = auth::rotate_named_key(target, auth::LOGIN_KEY_NAME, chrono::Utc::now());
     storage::write_json(&state.paths.users_file(), &users).await?;
     tracing::info!(target: "lunadb::ops", op = %"rotate_key", user = %user.0.username);
     Ok(Json(json!({ "api_key": api_key })))

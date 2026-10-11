@@ -8,7 +8,7 @@ use crate::auth::AuthUser;
 use crate::engine;
 use crate::error::AppError;
 use crate::models::DbMeta;
-use crate::schema::TableSchema;
+use crate::schema::{SchemaPatch, TableSchema};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +104,18 @@ pub async fn set_schema(
 ) -> Result<Json<TableSchema>, AppError> {
     Ok(Json(
         engine::set_schema(&state, &user.0, &db, &table, schema, params.force).await?,
+    ))
+}
+
+pub async fn patch_schema(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((db, table)): Path<(String, String)>,
+    Query(params): Query<ForceParams>,
+    Json(patch): Json<SchemaPatch>,
+) -> Result<Json<TableSchema>, AppError> {
+    Ok(Json(
+        engine::patch_schema(&state, &user.0, &db, &table, patch, params.force).await?,
     ))
 }
 

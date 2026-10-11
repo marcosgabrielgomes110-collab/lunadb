@@ -1,25 +1,20 @@
-mod api;
-mod auth;
-mod bootstrap;
-mod config;
-mod crypto;
-mod engine;
-mod error;
-mod models;
-mod query;
-mod schema;
-mod state;
-mod storage;
-
+use anyhow::bail;
 use clap::{Parser, Subcommand};
+use lunadb::{
+    api, bootstrap, client as http_client, config, crypto, engine, shell, state, storage,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "lunadb", version, about = "Banco de dados JSON via API")]
+#[command(name = "lunadb", version, about = "Banco de dados JSON/MessagePack via API")]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    server: Option<String>,
+    #[arg(long, global = true)]
+    key: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -28,11 +23,41 @@ struct Cli {
 enum Command {
     Init,
     Serve,
+    Shell,
+    #[command(name = "apikey")]
+    ApiKey {
+        #[command(subcommand)]
+        action: ApiKeyAction,
+    },
+    Migrate {
+        #[arg(long, default_value = "msgpack")]
+        to: String,
+        #[arg(long)]
+        force: bool,
+    },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[derive(Debug, Subcommand)]
+enum ApiKeyAction {
+    Create {
+        user: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    List {
+        user: Option<String>,
+    },
+    Revoke {
+        user: String,
+        #[arg(value_name = "KEY")]
+        key_ref: String,
+    },
+}
+
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let server_override = cli.server.clone();
+    let key_override = resolve_key(&cli);
     let config_path = resolve_config_path(&cli);
     let created_config = !config_path.exists();
     let config = if created_config {
@@ -43,8 +68,48 @@ async fn main() -> anyhow::Result<()> {
         config::Config::load(&config_path)?
     };
     let paths = config::Paths::from_config(&config);
-    let _log_guard = init_logging(&paths, &config)?;
 
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => {
+            let _guard = init_logging(&paths, &config)?;
+            log_startup(&paths, &config, &config_path, created_config);
+            runtime()?.block_on(async {
+                bootstrap::init(&paths, &config).await?;
+                serve(paths, config, config_path).await
+            })
+        }
+        Command::Init => {
+            let _guard = init_logging(&paths, &config)?;
+            runtime()?.block_on(bootstrap::init(&paths, &config))?;
+            println!("LunaDB inicializado em {}", paths.home.display());
+            println!(
+                "root: {} (senha definida em {})",
+                config.root.username,
+                config_path.display()
+            );
+            Ok(())
+        }
+        Command::Migrate { to, force } => migrate_command(&paths, &to, force),
+        Command::Shell => {
+            let base_url = server_override.unwrap_or_else(|| default_base_url(&config));
+            shell::run(&paths, base_url, key_override)
+        }
+        Command::ApiKey { action } => {
+            let base_url = server_override.unwrap_or_else(|| default_base_url(&config));
+            let key = key_override.ok_or_else(|| {
+                anyhow::anyhow!("informe --key ou defina LUNADB_API_KEY para gerenciar api keys")
+            })?;
+            run_apikey(base_url, key, action)
+        }
+    }
+}
+
+fn log_startup(
+    paths: &config::Paths,
+    _config: &config::Config,
+    config_path: &std::path::Path,
+    created_config: bool,
+) {
     if created_config {
         tracing::info!(path = %config_path.display(), "config criado");
     }
@@ -56,21 +121,12 @@ async fn main() -> anyhow::Result<()> {
         log_file = %paths.log_file().display(),
         "lunadb iniciando"
     );
+}
 
-    bootstrap::init(&paths, &config).await?;
-
-    match cli.command.unwrap_or(Command::Serve) {
-        Command::Init => {
-            println!("LunaDB inicializado em {}", paths.home.display());
-            println!(
-                "root: {} (senha definida em {})",
-                config.root.username,
-                config_path.display()
-            );
-            Ok(())
-        }
-        Command::Serve => serve(paths, config, config_path).await,
-    }
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?)
 }
 
 async fn serve(
@@ -125,6 +181,106 @@ async fn write_status(state: &state::AppState) -> anyhow::Result<()> {
         "status registrado"
     );
     Ok(())
+}
+
+fn migrate_command(paths: &config::Paths, to: &str, force: bool) -> anyhow::Result<()> {
+    let target = match to {
+        "json" => storage::Format::Json,
+        "msgpack" => storage::Format::Msgpack,
+        other => bail!("formato invalido: '{other}' (use json ou msgpack)"),
+    };
+    if !force && server_running(paths) {
+        bail!(
+            "servidor parece estar rodando ({}); pare antes de migrar ou use --force",
+            paths.status_file().display()
+        );
+    }
+    let report = runtime()?.block_on(engine::migrate_tables(paths, target))?;
+    println!(
+        "tabelas convertidas: {} | ja no formato {}: {}",
+        report.converted.len(),
+        target.extension(),
+        report.skipped.len()
+    );
+    for label in &report.converted {
+        println!("  convertida: {label}");
+    }
+    Ok(())
+}
+
+fn server_running(paths: &config::Paths) -> bool {
+    let Ok(raw) = std::fs::read_to_string(paths.status_file()) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(pid) = value.get("pid").and_then(|pid| pid.as_u64()) else {
+        return false;
+    };
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn run_apikey(base_url: String, api_key: String, action: ApiKeyAction) -> anyhow::Result<()> {
+    let mut client = http_client::Client::new(base_url, Some(api_key));
+    match action {
+        ApiKeyAction::Create { user, name } => {
+            let id = resolve_user_id(&mut client, &user)?;
+            let value = client.post(
+                &format!("/users/{id}/api-keys"),
+                serde_json::json!({ "name": name }),
+            )?;
+            match value["key"].as_str() {
+                Some(key) => println!("{key}"),
+                None => println!("{}", serde_json::to_string_pretty(&value)?),
+            }
+        }
+        ApiKeyAction::List { user } => {
+            let path = match user {
+                Some(user) => {
+                    let id = resolve_user_id(&mut client, &user)?;
+                    format!("/users/{id}/api-keys")
+                }
+                None => "/auth/api-keys".to_string(),
+            };
+            let keys = client.get(&path)?;
+            println!("{}", serde_json::to_string_pretty(&keys)?);
+        }
+        ApiKeyAction::Revoke { user, key_ref } => {
+            let id = resolve_user_id(&mut client, &user)?;
+            let value = client.delete(&format!("/users/{id}/api-keys/{key_ref}"))?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_user_id(client: &mut http_client::Client, username: &str) -> anyhow::Result<String> {
+    if username == "self" {
+        let me = client.get("/me")?;
+        return Ok(me["id"].as_str().unwrap_or_default().to_string());
+    }
+    let users = client.get("/users")?;
+    users
+        .as_array()
+        .and_then(|users| {
+            users
+                .iter()
+                .find(|user| user["username"] == username)
+                .and_then(|user| user["id"].as_str())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("usuario '{username}' nao encontrado"))
+}
+
+fn default_base_url(config: &config::Config) -> String {
+    format!("http://{}:{}", config.server.host, config.server.port)
+}
+
+fn resolve_key(cli: &Cli) -> Option<String> {
+    cli.key
+        .clone()
+        .or_else(|| std::env::var("LUNADB_API_KEY").ok())
 }
 
 fn init_logging(

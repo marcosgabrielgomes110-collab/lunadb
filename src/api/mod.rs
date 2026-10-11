@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod dbs;
+pub mod keys;
 pub mod records;
 pub mod status;
 pub mod users;
@@ -23,10 +24,20 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(status::status))
         .route("/auth/login", post(auth::login))
         .route("/auth/rotate-key", post(auth::rotate_key))
+        .route(
+            "/auth/api-keys",
+            get(keys::list_self).post(keys::create_self),
+        )
+        .route("/auth/api-keys/{key}", delete(keys::revoke_self))
         .route("/me", get(auth::me))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{id}", delete(users::delete))
         .route("/users/{id}/grants", put(users::set_grants))
+        .route(
+            "/users/{id}/api-keys",
+            get(keys::list_for_user).post(keys::create_for_user),
+        )
+        .route("/users/{id}/api-keys/{key}", delete(keys::revoke_for_user))
         .route("/roles", get(users::list_roles))
         .route("/dbs", get(dbs::list).post(dbs::create))
         .route("/dbs/{db}", get(dbs::get).delete(dbs::delete))
@@ -42,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             "/dbs/{db}/tables/{table}/schema",
             get(dbs::get_schema)
                 .put(dbs::set_schema)
+                .patch(dbs::patch_schema)
                 .delete(dbs::delete_schema),
         )
         .route(

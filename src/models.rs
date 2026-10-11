@@ -33,12 +33,58 @@ pub struct Grant {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_hash: Option<String>,
+    #[serde(default)]
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl ApiKey {
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyPublic {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked: bool,
+}
+
+impl From<&ApiKey> for ApiKeyPublic {
+    fn from(key: &ApiKey) -> Self {
+        Self {
+            id: key.id.clone(),
+            name: key.name.clone(),
+            prefix: key.prefix.clone(),
+            created_at: key.created_at,
+            last_used_at: key.last_used_at,
+            revoked: !key.is_active(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
     pub username: String,
     pub password_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_hash: Option<String>,
+    #[serde(default)]
+    pub api_keys: Vec<ApiKey>,
     pub role: String,
     #[serde(default)]
     pub grants: Vec<Grant>,
