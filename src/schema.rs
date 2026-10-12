@@ -128,33 +128,39 @@ fn merge_json(base: &mut Value, patch: &Value) {
 pub fn apply_patch(schema: &mut TableSchema, patch: &SchemaPatch) -> Result<(), AppError> {
     for name in &patch.remove {
         if schema.fields.remove(name).is_none() {
-            return Err(patch_error(format!("campo '{name}' nao existe")));
+            return Err(patch_error(format!("field '{name}' does not exist")));
         }
     }
     for (name, changes) in &patch.update {
         let Some(existing) = schema.fields.get_mut(name) else {
-            return Err(patch_error(format!("campo '{name}' nao existe (use add)")));
+            return Err(patch_error(format!(
+                "field '{name}' does not exist (use add)"
+            )));
         };
         let mut base = serde_json::to_value(&*existing)?;
         merge_json(&mut base, changes);
         let updated: FieldSchema = serde_json::from_value(base)
-            .map_err(|err| patch_error(format!("campo '{name}' invalido: {err}")))?;
+            .map_err(|err| patch_error(format!("invalid field '{name}': {err}")))?;
         *existing = updated;
     }
     for (name, value) in &patch.add {
         if schema.fields.contains_key(name) {
             return Err(patch_error(format!(
-                "campo '{name}' ja existe (use update)"
+                "field '{name}' already exists (use update)"
             )));
         }
         let field: FieldSchema = serde_json::from_value(value.clone())
-            .map_err(|err| patch_error(format!("campo '{name}' invalido: {err}")))?;
+            .map_err(|err| patch_error(format!("invalid field '{name}': {err}")))?;
         schema.fields.insert(name.clone(), field);
     }
     for key in &patch.unique_add {
         let label = key.label();
-        if schema.unique.iter().any(|existing| existing.label() == label) {
-            return Err(patch_error(format!("unique '{label}' ja existe")));
+        if schema
+            .unique
+            .iter()
+            .any(|existing| existing.label() == label)
+        {
+            return Err(patch_error(format!("unique '{label}' already exists")));
         }
         schema.unique.push(key.clone());
     }
@@ -165,7 +171,7 @@ pub fn apply_patch(schema: &mut TableSchema, patch: &SchemaPatch) -> Result<(), 
             .iter()
             .position(|existing| existing.label() == label)
         else {
-            return Err(patch_error(format!("unique '{label}' nao existe")));
+            return Err(patch_error(format!("unique '{label}' does not exist")));
         };
         schema.unique.remove(index);
     }
@@ -189,7 +195,7 @@ pub fn canonical(value: &Value) -> String {
 }
 
 fn schema_error(message: impl Into<String>) -> AppError {
-    AppError::BadRequest(format!("schema invalido: {}", message.into()))
+    AppError::BadRequest(format!("invalid schema: {}", message.into()))
 }
 
 #[derive(Debug, Default)]
@@ -242,33 +248,33 @@ pub fn compile(schema: &TableSchema) -> Result<(), AppError> {
     for key in &schema.unique {
         let fields = key.fields();
         if fields.is_empty() {
-            return Err(schema_error("unique: chave vazia"));
+            return Err(schema_error("unique: empty key"));
         }
         let mut components = BTreeSet::new();
         for name in &fields {
             if name.is_empty() {
-                return Err(schema_error("unique: nome de campo vazio"));
+                return Err(schema_error("unique: empty field name"));
             }
             if !components.insert(name.clone()) {
                 return Err(schema_error(format!(
-                    "unique: campo '{name}' repetido na chave '{}'",
+                    "unique: field '{name}' repeated in key '{}'",
                     key.label()
                 )));
             }
             let Some(field) = schema.fields.get(name) else {
                 return Err(schema_error(format!(
-                    "unique: campo '{name}' nao declarado no schema"
+                    "unique: field '{name}' not declared in schema"
                 )));
             };
             if field.encrypted {
                 return Err(schema_error(format!(
-                    "unique: campo '{name}' nao pode ser encrypted"
+                    "unique: field '{name}' cannot be encrypted"
                 )));
             }
         }
         let label = key.label();
         if !seen.insert(label.clone()) {
-            return Err(schema_error(format!("unique: chave '{label}' duplicada")));
+            return Err(schema_error(format!("unique: duplicate key '{label}'")));
         }
     }
     Ok(())
@@ -278,75 +284,77 @@ fn compile_field(path: &str, field: &FieldSchema, top: bool) -> Result<(), AppEr
     let leaf = path.rsplit('.').next().unwrap_or(path);
     if leaf.starts_with('_') {
         return Err(schema_error(format!(
-            "campo '{path}': nomes iniciados por '_' sao reservados"
+            "field '{path}': names starting with '_' are reserved"
         )));
     }
     if !top {
         if field.encrypted {
             return Err(schema_error(format!(
-                "campo '{path}': encrypted so e suportado em campos de primeiro nivel"
+                "field '{path}': encrypted is only supported on top-level fields"
             )));
         }
         if field.unique {
             return Err(schema_error(format!(
-                "campo '{path}': unique so e suportado em campos de primeiro nivel"
+                "field '{path}': unique is only supported on top-level fields"
             )));
         }
         if field.auto.is_some() {
             return Err(schema_error(format!(
-                "campo '{path}': auto so e suportado em campos de primeiro nivel"
+                "field '{path}': auto is only supported on top-level fields"
             )));
         }
     }
     if field.encrypted && field.unique {
         return Err(schema_error(format!(
-            "campo '{path}': unique nao e suportado em campo encrypted"
+            "field '{path}': unique is not supported on encrypted fields"
         )));
     }
     if field.encrypted && field.auto.is_some() {
         return Err(schema_error(format!(
-            "campo '{path}': auto nao pode ser encrypted"
+            "field '{path}': auto cannot be encrypted"
         )));
     }
     match field.field_type {
         FieldType::Int | FieldType::Float => {
             if field.min_length.is_some() || field.max_length.is_some() {
                 return Err(schema_error(format!(
-                    "campo '{path}': min_length/max_length so valem para string/array"
+                    "field '{path}': min_length/max_length only apply to string/array"
                 )));
             }
             if field.pattern.is_some() {
                 return Err(schema_error(format!(
-                    "campo '{path}': pattern so vale para string"
+                    "field '{path}': pattern only applies to string"
                 )));
             }
             if let (Some(min), Some(max)) = (field.min, field.max)
                 && min > max
             {
-                return Err(schema_error(format!("campo '{path}': min maior que max")));
+                return Err(schema_error(format!(
+                    "field '{path}': min greater than max"
+                )));
             }
         }
         FieldType::String | FieldType::Array => {
             if field.min.is_some() || field.max.is_some() {
                 return Err(schema_error(format!(
-                    "campo '{path}': min/max so valem para int/float"
+                    "field '{path}': min/max only apply to int/float"
                 )));
             }
             if let (Some(min), Some(max)) = (field.min_length, field.max_length)
                 && min > max
             {
                 return Err(schema_error(format!(
-                    "campo '{path}': min_length maior que max_length"
+                    "field '{path}': min_length greater than max_length"
                 )));
             }
             if field.field_type == FieldType::Array && field.pattern.is_some() {
                 return Err(schema_error(format!(
-                    "campo '{path}': pattern so vale para string"
+                    "field '{path}': pattern only applies to string"
                 )));
             }
             if let Some(pattern) = &field.pattern {
                 Regex::new(pattern).map_err(|err| {
-                    schema_error(format!("campo '{path}': pattern invalido: {err}"))
+                    schema_error(format!("field '{path}': invalid pattern: {err}"))
                 })?;
             }
         }
@@ -358,19 +366,19 @@ fn compile_field(path: &str, field: &FieldSchema, top: bool) -> Result<(), AppEr
                 || field.pattern.is_some()
             {
                 return Err(schema_error(format!(
-                    "campo '{path}': constraints numericas/de texto nao valem para o tipo declarado"
+                    "field '{path}': numeric/text constraints do not apply to the declared type"
                 )));
             }
         }
     }
     if field.items.is_some() && field.field_type != FieldType::Array {
         return Err(schema_error(format!(
-            "campo '{path}': items so vale para array"
+            "field '{path}': items only apply to array"
         )));
     }
     if field.fields.is_some() && field.field_type != FieldType::Object {
         return Err(schema_error(format!(
-            "campo '{path}': fields so vale para object"
+            "field '{path}': fields only apply to object"
         )));
     }
     if let Some(items) = &field.items {
@@ -383,12 +391,12 @@ fn compile_field(path: &str, field: &FieldSchema, top: bool) -> Result<(), AppEr
     }
     if let Some(enum_values) = &field.enum_values {
         if enum_values.is_empty() {
-            return Err(schema_error(format!("campo '{path}': enum vazio")));
+            return Err(schema_error(format!("field '{path}': empty enum")));
         }
         for value in enum_values {
             if !type_matches(field.field_type, value) {
                 return Err(schema_error(format!(
-                    "campo '{path}': valor do enum incompativel com o tipo"
+                    "field '{path}': enum value incompatible with the type"
                 )));
             }
         }
@@ -398,7 +406,7 @@ fn compile_field(path: &str, field: &FieldSchema, top: bool) -> Result<(), AppEr
     {
         let _ = auto;
         return Err(schema_error(format!(
-            "campo '{path}': auto so vale para datetime"
+            "field '{path}': auto only applies to datetime"
         )));
     }
     if let Some(default) = &field.default {
@@ -407,7 +415,7 @@ fn compile_field(path: &str, field: &FieldSchema, top: bool) -> Result<(), AppEr
         validate_value(path, field, &mut copy, &mut errors);
         if let Some(first) = errors.first() {
             return Err(schema_error(format!(
-                "campo '{path}': default invalido ({})",
+                "field '{path}': invalid default ({})",
                 first.message
             )));
         }
@@ -419,9 +427,7 @@ fn type_matches(field_type: FieldType, value: &Value) -> bool {
     match field_type {
         FieldType::String => value.is_string(),
         FieldType::Int => value.as_i64().is_some() || value.as_u64().is_some(),
-        FieldType::Float => {
-            value.is_f64() || value.as_i64().is_some() || value.as_u64().is_some()
-        }
+        FieldType::Float => value.is_f64() || value.as_i64().is_some() || value.as_u64().is_some(),
         FieldType::Bool => value.is_boolean(),
         FieldType::Datetime => value
             .as_str()
@@ -473,11 +479,16 @@ fn now_value() -> Value {
     json!(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
-fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &mut Vec<FieldError>) {
+fn validate_value(
+    path: &str,
+    field: &FieldSchema,
+    value: &mut Value,
+    errors: &mut Vec<FieldError>,
+) {
     if !type_matches(field.field_type, value) {
         errors.push(ferr(
             path,
-            format!("tipo invalido: esperado '{}'", type_name(field.field_type)),
+            format!("invalid type: expected '{}'", type_name(field.field_type)),
         ));
         return;
     }
@@ -487,12 +498,15 @@ fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &m
                 if let Some(min) = field.min
                     && number < min
                 {
-                    errors.push(ferr(path, format!("valor menor que o minimo ({min})")));
+                    errors.push(ferr(path, format!("value less than the minimum ({min})")));
                 }
                 if let Some(max) = field.max
                     && number > max
                 {
-                    errors.push(ferr(path, format!("valor maior que o maximo ({max})")));
+                    errors.push(ferr(
+                        path,
+                        format!("value greater than the maximum ({max})"),
+                    ));
                 }
             }
         }
@@ -502,18 +516,18 @@ fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &m
                 if let Some(min) = field.min_length
                     && len < min
                 {
-                    errors.push(ferr(path, format!("texto menor que min_length ({min})")));
+                    errors.push(ferr(path, format!("text shorter than min_length ({min})")));
                 }
                 if let Some(max) = field.max_length
                     && len > max
                 {
-                    errors.push(ferr(path, format!("texto maior que max_length ({max})")));
+                    errors.push(ferr(path, format!("text longer than max_length ({max})")));
                 }
                 if let Some(pattern) = &field.pattern
-                    && let Ok(regex) = Regex::new(pattern)
+                    && let Ok(regex) = crate::regex_cache::compiled(pattern)
                     && !regex.is_match(text)
                 {
-                    errors.push(ferr(path, "valor nao corresponde ao pattern"));
+                    errors.push(ferr(path, "value does not match the pattern"));
                 }
             }
         }
@@ -523,12 +537,12 @@ fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &m
                 if let Some(min) = field.min_length
                     && len < min
                 {
-                    errors.push(ferr(path, format!("array menor que min_length ({min})")));
+                    errors.push(ferr(path, format!("array shorter than min_length ({min})")));
                 }
                 if let Some(max) = field.max_length
                     && len > max
                 {
-                    errors.push(ferr(path, format!("array maior que max_length ({max})")));
+                    errors.push(ferr(path, format!("array longer than max_length ({max})")));
                 }
                 if let Some(item_schema) = &field.items {
                     for (index, item) in items.iter_mut().enumerate() {
@@ -548,13 +562,13 @@ fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &m
                             if let Some(default) = &sub.default {
                                 object.insert(name.clone(), default.clone());
                             } else if sub.required {
-                                errors.push(ferr(sub_path, "campo obrigatorio ausente"));
+                                errors.push(ferr(sub_path, "required field missing"));
                             }
                         }
                         Some(sub_value) => {
                             if sub_value.is_null() {
                                 if !sub.nullable {
-                                    errors.push(ferr(sub_path, "nao pode ser nulo"));
+                                    errors.push(ferr(sub_path, "cannot be null"));
                                 }
                             } else {
                                 validate_value(&sub_path, sub, sub_value, errors);
@@ -569,7 +583,7 @@ fn validate_value(path: &str, field: &FieldSchema, value: &mut Value, errors: &m
     if let Some(enum_values) = &field.enum_values
         && !enum_values.contains(value)
     {
-        errors.push(ferr(path, "valor fora do enum"));
+        errors.push(ferr(path, "value outside the enum"));
     }
 }
 
@@ -582,7 +596,7 @@ pub fn prepare_record(
 ) -> Result<(), Vec<FieldError>> {
     let mut errors = Vec::new();
     let Some(object) = record.as_object_mut() else {
-        return Err(vec![ferr("_", "registro deve ser um objeto JSON")]);
+        return Err(vec![ferr("_", "record must be a JSON object")]);
     };
     for (name, field) in &schema.fields {
         if let Some(auto) = field.auto {
@@ -605,16 +619,16 @@ pub fn prepare_record(
             if let Some(default) = &field.default {
                 object.insert(name.clone(), default.clone());
             } else if field.required {
-                errors.push(ferr(name, "campo obrigatorio ausente"));
+                errors.push(ferr(name, "required field missing"));
                 continue;
             } else {
                 continue;
             }
         }
-        let value = object.get_mut(name).expect("inserido acima");
+        let value = object.get_mut(name).expect("inserted above");
         if value.is_null() {
             if !field.nullable {
-                errors.push(ferr(name, "nao pode ser nulo"));
+                errors.push(ferr(name, "cannot be null"));
             }
             continue;
         }
@@ -622,7 +636,7 @@ pub fn prepare_record(
         if field.unique {
             let key = canonical(value);
             if unique.has_single(name, &key) {
-                errors.push(ferr_unique(name, "valor ja existe (unique)"));
+                errors.push(ferr_unique(name, "value already exists (unique)"));
             }
         }
     }
@@ -634,14 +648,14 @@ pub fn prepare_record(
         if unique.has_compound(&fields, &combo) {
             errors.push(ferr_unique(
                 key.label(),
-                "combinacao ja existe (unique)",
+                "combination already exists (unique)",
             ));
         }
     }
     if schema.strict {
         for key in object.keys() {
             if !schema.fields.contains_key(key) {
-                errors.push(ferr(key, "campo desconhecido (schema strict)"));
+                errors.push(ferr(key, "unknown field (strict schema)"));
             }
         }
     }
@@ -691,7 +705,7 @@ mod tests {
     use serde_json::json;
 
     fn table_schema(value: Value) -> TableSchema {
-        serde_json::from_value(value).expect("schema valido")
+        serde_json::from_value(value).expect("valid schema")
     }
 
     fn base_schema() -> TableSchema {
@@ -701,14 +715,14 @@ mod tests {
                 "tenant": {"type": "string"},
                 "email": {"type": "string"},
                 "cpf": {"type": "string", "nullable": true},
-                "nome": {"type": "string", "required": true},
-                "idade": {"type": "int", "min": 0, "max": 150},
-                "ativo": {"type": "bool", "default": true},
-                "senha": {"type": "string", "encrypted": true},
+                "name": {"type": "string", "required": true},
+                "age": {"type": "int", "min": 0, "max": 150},
+                "active": {"type": "bool", "default": true},
+                "password": {"type": "string", "encrypted": true},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "endereco": {"type": "object", "fields": {"cidade": {"type": "string", "required": true}}},
-                "criado": {"type": "datetime", "auto": "created_at"},
-                "atualizado": {"type": "datetime", "auto": "updated_at"}
+                "address": {"type": "object", "fields": {"city": {"type": "string", "required": true}}},
+                "created": {"type": "datetime", "auto": "created_at"},
+                "updated": {"type": "datetime", "auto": "updated_at"}
             }
         }))
     }
@@ -726,8 +740,8 @@ mod tests {
         let unknown = table_schema(json!({"unique": ["nope"], "fields": {}}));
         assert!(compile(&unknown).is_err());
         let encrypted = table_schema(json!({
-            "unique": ["senha"],
-            "fields": {"senha": {"type": "string", "encrypted": true}}
+            "unique": ["password"],
+            "fields": {"password": {"type": "string", "encrypted": true}}
         }));
         assert!(compile(&encrypted).is_err());
         let repeated = table_schema(json!({
@@ -757,7 +771,7 @@ mod tests {
         }));
         assert!(compile(&nested_encrypted).is_err());
         let bad_default = table_schema(json!({
-            "fields": {"a": {"type": "int", "default": "texto"}}
+            "fields": {"a": {"type": "int", "default": "text"}}
         }));
         assert!(compile(&bad_default).is_err());
     }
@@ -765,7 +779,7 @@ mod tests {
     #[test]
     fn prepare_applies_defaults_auto_and_required() {
         let schema = base_schema();
-        let mut record = json!({"nome": "Ana", "senha": "s", "tenant": "t", "email": "a@x"});
+        let mut record = json!({"name": "Ana", "password": "s", "tenant": "t", "email": "a@x"});
         prepare_record(
             &schema,
             &mut record,
@@ -774,9 +788,9 @@ mod tests {
             &UniqueIndex::new(),
         )
         .unwrap();
-        assert_eq!(record["ativo"], json!(true));
-        assert!(record["criado"].is_string());
-        assert!(record["atualizado"].is_string());
+        assert_eq!(record["active"], json!(true));
+        assert!(record["created"].is_string());
+        assert!(record["updated"].is_string());
 
         let missing = prepare_record(
             &schema,
@@ -786,17 +800,17 @@ mod tests {
             &UniqueIndex::new(),
         )
         .unwrap_err();
-        assert!(missing.iter().any(|error| error.field == "nome"));
+        assert!(missing.iter().any(|error| error.field == "name"));
     }
 
     #[test]
     fn prepare_rejects_wrong_types_and_strict_fields() {
         let schema = base_schema();
         let mut record = json!({
-            "nome": "Ana",
-            "idade": 200,
+            "name": "Ana",
+            "age": 200,
             "tags": [1, 2],
-            "endereco": {},
+            "address": {},
             "extra": true
         });
         let errors = prepare_record(
@@ -807,18 +821,21 @@ mod tests {
             &UniqueIndex::new(),
         )
         .unwrap_err();
-        let fields = errors.iter().map(|error| error.field.as_str()).collect::<Vec<_>>();
-        assert!(fields.contains(&"idade"));
+        let fields = errors
+            .iter()
+            .map(|error| error.field.as_str())
+            .collect::<Vec<_>>();
+        assert!(fields.contains(&"age"));
         assert!(fields.contains(&"tags[0]"));
-        assert!(fields.contains(&"endereco.cidade"));
+        assert!(fields.contains(&"address.city"));
 
         let strict = table_schema(json!({
             "strict": true,
-            "fields": {"nome": {"type": "string"}}
+            "fields": {"name": {"type": "string"}}
         }));
         let errors = prepare_record(
             &strict,
-            &mut json!({"nome": "Ana", "extra": 1}),
+            &mut json!({"name": "Ana", "extra": 1}),
             Mode::Create,
             None,
             &UniqueIndex::new(),
@@ -836,26 +853,27 @@ mod tests {
             &schema,
             &json!({"cpf": "111", "tenant": "t1", "email": "a@x"}),
         );
-        assert!(index.has_compound(
-            &["cpf".to_string()],
-            &canonical(&json!(["111"]))
-        ));
+        assert!(index.has_compound(&["cpf".to_string()], &canonical(&json!(["111"]))));
         let fields = vec!["tenant".to_string(), "email".to_string()];
         assert!(index.has_compound(&fields, &canonical(&json!(["t1", "a@x"]))));
 
         let errors = prepare_record(
             &schema,
-            &mut json!({"nome": "B", "cpf": "111"}),
+            &mut json!({"name": "B", "cpf": "111"}),
             Mode::Create,
             None,
             &index,
         )
         .unwrap_err();
-        assert!(errors.iter().any(|error| error.unique && error.field == "cpf"));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.unique && error.field == "cpf")
+        );
 
         let errors = prepare_record(
             &schema,
-            &mut json!({"nome": "B", "cpf": "222", "tenant": "t1", "email": "a@x"}),
+            &mut json!({"name": "B", "cpf": "222", "tenant": "t1", "email": "a@x"}),
             Mode::Create,
             None,
             &index,
@@ -869,17 +887,15 @@ mod tests {
 
         let errors = prepare_record(
             &schema,
-            &mut json!({"nome": "B", "cpf": null, "tenant": "t1", "email": "a@x"}),
+            &mut json!({"name": "B", "cpf": null, "tenant": "t1", "email": "a@x"}),
             Mode::Create,
             None,
             &index,
         )
         .unwrap_err();
         assert!(
-            errors
-                .iter()
-                .all(|error| error.field != "cpf"),
-            "cpf null nao deveria violar unique: {errors:?}"
+            errors.iter().all(|error| error.field != "cpf"),
+            "cpf null should not violate unique: {errors:?}"
         );
         assert!(
             errors
@@ -890,20 +906,20 @@ mod tests {
         assert!(
             prepare_record(
                 &schema,
-                &mut json!({"nome": "B", "cpf": null, "tenant": "t2", "email": "b@x"}),
+                &mut json!({"name": "B", "cpf": null, "tenant": "t2", "email": "b@x"}),
                 Mode::Create,
                 None,
                 &index,
             )
             .is_ok(),
-            "componentes nulos nao participam do unique"
+            "null components do not participate in unique"
         );
     }
 
     #[test]
     fn replace_preserves_created_at() {
         let schema = base_schema();
-        let mut created = json!({"nome": "Ana"});
+        let mut created = json!({"name": "Ana"});
         prepare_record(
             &schema,
             &mut created,
@@ -912,9 +928,9 @@ mod tests {
             &UniqueIndex::new(),
         )
         .unwrap();
-        let created_at = created["criado"].clone();
+        let created_at = created["created"].clone();
 
-        let mut replaced = json!({"nome": "Ana Maria"});
+        let mut replaced = json!({"name": "Ana Maria"});
         prepare_record(
             &schema,
             &mut replaced,
@@ -923,50 +939,51 @@ mod tests {
             &UniqueIndex::new(),
         )
         .unwrap();
-        assert_eq!(replaced["criado"], created_at);
+        assert_eq!(replaced["created"], created_at);
     }
 
     fn patch(value: Value) -> SchemaPatch {
-        serde_json::from_value(value).expect("patch valido")
+        serde_json::from_value(value).expect("valid patch")
     }
 
     #[test]
     fn patch_creates_schema_from_scratch() {
         let mut schema = TableSchema::default();
         let operation = patch(json!({
-            "add": {"nome": {"type": "string", "required": true}},
-            "unique_add": ["nome"],
+            "add": {"name": {"type": "string", "required": true}},
+            "unique_add": ["name"],
             "strict": true
         }));
         apply_patch(&mut schema, &operation).unwrap();
         assert!(schema.strict);
         assert_eq!(schema.fields.len(), 1);
-        assert_eq!(schema.fields["nome"].field_type, FieldType::String);
-        assert_eq!(schema.unique[0].label(), "nome");
+        assert_eq!(schema.fields["name"].field_type, FieldType::String);
+        assert_eq!(schema.unique[0].label(), "name");
     }
 
     #[test]
     fn patch_rejects_invalid_operations() {
         let mut schema = base_schema();
-        let add_existing = patch(json!({"add": {"nome": {"type": "string"}}}));
+        let add_existing = patch(json!({"add": {"name": {"type": "string"}}}));
         assert!(apply_patch(&mut schema, &add_existing).is_err());
 
-        let remove_missing = patch(json!({"remove": ["nao_existe"]}));
+        let remove_missing = patch(json!({"remove": ["does_not_exist"]}));
         assert!(apply_patch(&mut schema, &remove_missing).is_err());
 
-        let update_missing = patch(json!({"update": {"nao_existe": {"required": true}}}));
+        let update_missing = patch(json!({"update": {"does_not_exist": {"required": true}}}));
         assert!(apply_patch(&mut schema, &update_missing).is_err());
 
         let unique_exists = patch(json!({"unique_add": ["cpf"]}));
         assert!(apply_patch(&mut schema, &unique_exists).is_err());
 
-        let unique_missing = patch(json!({"unique_remove": ["nao_existe"]}));
+        let unique_missing = patch(json!({"unique_remove": ["does_not_exist"]}));
         assert!(apply_patch(&mut schema, &unique_missing).is_err());
 
-        let bad_field = patch(json!({"add": {"x": {"type": "inexistente"}}}));
+        let bad_field = patch(json!({"add": {"x": {"type": "nonexistent"}}}));
         assert!(apply_patch(&mut schema, &bad_field).is_err());
 
-        let unknown_unique_field = patch(json!({"add": {"y": {"type": "string"}}, "unique_add": ["nao_declarado"]}));
+        let unknown_unique_field =
+            patch(json!({"add": {"y": {"type": "string"}}, "unique_add": ["not_declared"]}));
         assert!(apply_patch(&mut schema, &unknown_unique_field).is_err());
     }
 
@@ -975,19 +992,19 @@ mod tests {
         let mut schema = base_schema();
         let operation = patch(json!({
             "update": {
-                "idade": {"min": 5, "max": null},
+                "age": {"min": 5, "max": null},
                 "cpf": {"required": true},
-                "nome": {"min_length": 3, "max_length": 40}
+                "name": {"min_length": 3, "max_length": 40}
             }
         }));
         apply_patch(&mut schema, &operation).unwrap();
-        assert_eq!(schema.fields["idade"].min, Some(5.0));
-        assert_eq!(schema.fields["idade"].max, None);
+        assert_eq!(schema.fields["age"].min, Some(5.0));
+        assert_eq!(schema.fields["age"].max, None);
         assert!(schema.fields["cpf"].required);
-        assert_eq!(schema.fields["nome"].min_length, Some(3));
-        assert_eq!(schema.fields["nome"].max_length, Some(40));
+        assert_eq!(schema.fields["name"].min_length, Some(3));
+        assert_eq!(schema.fields["name"].max_length, Some(40));
 
-        let bad_type = patch(json!({"update": {"idade": {"type": "nao_existe"}}}));
+        let bad_type = patch(json!({"update": {"age": {"type": "does_not_exist"}}}));
         assert!(apply_patch(&mut schema, &bad_type).is_err());
     }
 
@@ -995,12 +1012,12 @@ mod tests {
     fn patch_remove_field_and_unique() {
         let mut schema = base_schema();
         let operation = patch(json!({
-            "remove": ["tags", "endereco"],
+            "remove": ["tags", "address"],
             "unique_remove": ["cpf"]
         }));
         apply_patch(&mut schema, &operation).unwrap();
         assert!(!schema.fields.contains_key("tags"));
-        assert!(!schema.fields.contains_key("endereco"));
+        assert!(!schema.fields.contains_key("address"));
         assert_eq!(schema.unique.len(), 1);
         assert_eq!(schema.unique[0].label(), "tenant+email");
     }

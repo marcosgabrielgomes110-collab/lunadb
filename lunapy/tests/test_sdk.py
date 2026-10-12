@@ -32,9 +32,9 @@ def test_health_and_auth_errors(server):
     assert client.health()["status"] == "ok"
 
     with pytest.raises(LunaAuthError):
-        client.login("root", "senha-errada")
+        client.login("root", "wrong-password")
 
-    bad_key = LunaClient(base_url=server["base_url"], api_key="luna_invalida")
+    bad_key = LunaClient(base_url=server["base_url"], api_key="luna_invalid")
     with pytest.raises(LunaAuthError):
         bad_key.me()
 
@@ -59,33 +59,33 @@ def test_status_and_rotate(server):
 
 def test_records_crud_and_query(admin, db):
     admin.create_table(db, "users")
-    first = admin.create_record(db, "users", {"nome": "Ana", "idade": 30, "tags": ["dev"]})
-    second = admin.create_record(db, "users", {"nome": "Bia", "idade": 25, "tags": ["vip"]})
-    admin.create_record(db, "users", {"nome": "Caio", "idade": 40, "tags": ["vip", "dev"]})
+    first = admin.create_record(db, "users", {"name": "Ana", "age": 30, "tags": ["dev"]})
+    second = admin.create_record(db, "users", {"name": "Bia", "age": 25, "tags": ["vip"]})
+    admin.create_record(db, "users", {"name": "Caio", "age": 40, "tags": ["vip", "dev"]})
 
     assert first["_id"]
-    assert admin.get_record(db, "users", first["_id"])["nome"] == "Ana"
+    assert admin.get_record(db, "users", first["_id"])["name"] == "Ana"
     updated = admin.replace_record(
-        db, "users", second["_id"], {"nome": "Bia", "idade": 26, "tags": ["vip"]}
+        db, "users", second["_id"], {"name": "Bia", "age": 26, "tags": ["vip"]}
     )
-    assert updated["idade"] == 26
+    assert updated["age"] == 26
 
     result = admin.query(
         db,
         "users",
-        filter={"idade": {"$gte": 30}},
-        sort=[Sort("idade", "desc")],
-        fields=["nome", "idade"],
+        filter={"age": {"$gte": 30}},
+        sort=[Sort("age", "desc")],
+        fields=["name", "age"],
     )
     assert result.total == 2
-    assert [record["nome"] for record in result.records] == ["Caio", "Ana"]
+    assert [record["name"] for record in result.records] == ["Caio", "Ana"]
     assert "tags" not in result.records[0]
 
-    by_tag = admin.query(db, "users", filter={"tags": {"$contains": "vip"}}, fields=["nome"])
+    by_tag = admin.query(db, "users", filter={"tags": {"$contains": "vip"}}, fields=["name"])
     assert by_tag.total == 2
 
-    page = admin.query(db, "users", sort=["-idade"], limit=1, offset=1, fields=["nome"])
-    assert page.total == 3 and page.count == 1 and page.records[0]["nome"] == "Ana"
+    page = admin.query(db, "users", sort=["-age"], limit=1, offset=1, fields=["name"])
+    assert page.total == 3 and page.count == 1 and page.records[0]["name"] == "Ana"
 
     admin.delete_record(db, "users", first["_id"])
     assert len(admin.list_records(db, "users")) == 2
@@ -102,22 +102,22 @@ def test_schema_validation_and_unique(admin, db):
             "tenant": Field(FieldType.STRING, required=True),
             "email": Field(FieldType.STRING, required=True, pattern=r".+@.+\..+"),
             "cpf": Field(FieldType.STRING, nullable=True),
-            "idade": Field(FieldType.INT, min=0, max=150),
-            "ativo": Field(FieldType.BOOL, default=True),
+            "age": Field(FieldType.INT, min=0, max=150),
+            "active": Field(FieldType.BOOL, default=True),
         },
     )
     admin.create_table(db, "users", schema=schema)
     assert admin.get_schema(db, "users") == schema
 
     record = admin.create_record(
-        db, "users", {"tenant": "t1", "email": "ana@x.com", "cpf": "111", "idade": 30}
+        db, "users", {"tenant": "t1", "email": "ana@x.com", "cpf": "111", "age": 30}
     )
-    assert record["ativo"] is True
+    assert record["active"] is True
 
     with pytest.raises(LunaValidationError) as err:
-        admin.create_record(db, "users", {"email": "sem-arroba", "idade": 200, "extra": 1})
+        admin.create_record(db, "users", {"email": "no-at-sign", "age": 200, "extra": 1})
     fields = {item["field"] for item in err.value.fields}
-    assert {"tenant", "email", "idade", "extra"} <= fields
+    assert {"tenant", "email", "age", "extra"} <= fields
 
     with pytest.raises(LunaUniqueViolationError) as err:
         admin.create_record(db, "users", {"tenant": "t1", "email": "ana@x.com", "cpf": "222"})
@@ -130,23 +130,23 @@ def test_schema_validation_and_unique(admin, db):
 def test_encryption_at_rest(admin, db, server):
     schema = TableSchema(
         fields={
-            "nome": Field(FieldType.STRING, required=True),
-            "senha": Field(FieldType.STRING, required=True, encrypted=True),
+            "name": Field(FieldType.STRING, required=True),
+            "password": Field(FieldType.STRING, required=True, encrypted=True),
         }
     )
-    admin.create_table(db, "cofre", schema=schema)
-    admin.create_record(db, "cofre", {"nome": "Ana", "senha": "super-secreta"})
+    admin.create_table(db, "vault", schema=schema)
+    admin.create_record(db, "vault", {"name": "Ana", "password": "super-secret"})
 
-    table_path = server["storage"] / "dbs" / db / "cofre.msgpack"
-    assert table_path.exists(), "tabela deve ser gravada em msgpack"
+    table_path = server["storage"] / "dbs" / db / "vault.msgpack"
+    assert table_path.exists(), "table must be stored as msgpack"
     raw = table_path.read_bytes()
     assert b"enc:v1:" in raw
-    assert b"super-secreta" not in raw
+    assert b"super-secret" not in raw
 
-    listed = admin.list_records(db, "cofre")
-    assert listed[0]["senha"] == "super-secreta"
-    queried = admin.query(db, "cofre", filter={"senha": "super-secreta"}, fields=["nome"])
-    assert queried.total == 1 and queried.records[0]["nome"] == "Ana"
+    listed = admin.list_records(db, "vault")
+    assert listed[0]["password"] == "super-secret"
+    queried = admin.query(db, "vault", filter={"password": "super-secret"}, fields=["name"])
+    assert queried.total == 1 and queried.records[0]["name"] == "Ana"
 
 
 def test_api_keys_sdk(admin, server):
@@ -165,8 +165,8 @@ def test_api_keys_sdk(admin, server):
     assert {item.name for item in keys} == {"ci", "login"}
     assert scoped.me().username == user.username
 
-    self_key, self_plaintext = scoped.create_api_key(name="pessoal")
-    assert self_key.name == "pessoal"
+    self_key, self_plaintext = scoped.create_api_key(name="personal")
+    assert self_key.name == "personal"
     assert len(scoped.list_api_keys()) >= 3
 
     with pytest.raises(LunaForbiddenError):
@@ -187,7 +187,7 @@ def test_cli_apikey_commands(admin, server):
         os.environ.get("LUNADB_BIN", REPO_ROOT / "target" / "debug" / "lunadb")
     )
     if not binary.exists():
-        pytest.skip("binario nao encontrado")
+        pytest.skip("binary not found")
     user = admin.create_user(f"cli{uuid_suffix()}", "cli12345678")
     env = {**os.environ, "LUNADB_API_KEY": admin.api_key}
 
@@ -246,37 +246,37 @@ def test_schema_migration(admin, db):
 
 def test_schema_patch_sdk(admin, db):
     admin.create_table(db, "t")
-    admin.create_record(db, "t", {"email": "a@x.com", "papel": "user"})
-    admin.create_record(db, "t", {"email": "b@x.com", "papel": "user"})
+    admin.create_record(db, "t", {"email": "a@x.com", "role": "user"})
+    admin.create_record(db, "t", {"email": "b@x.com", "role": "user"})
 
     schema = admin.add_schema_fields(
-        db, "t", {"ativo": Field(FieldType.BOOL, default=True)}
+        db, "t", {"active": Field(FieldType.BOOL, default=True)}
     )
-    assert schema.fields["ativo"].default is True
-    assert all(record["ativo"] is True for record in admin.list_records(db, "t"))
+    assert schema.fields["active"].default is True
+    assert all(record["active"] is True for record in admin.list_records(db, "t"))
 
-    schema = admin.update_schema_field(db, "t", "ativo", {"required": True})
-    assert schema.fields["ativo"].required is True
-    admin.add_schema_fields(db, "t", {"papel": Field(FieldType.STRING)})
+    schema = admin.update_schema_field(db, "t", "active", {"required": True})
+    assert schema.fields["active"].required is True
+    admin.add_schema_fields(db, "t", {"role": Field(FieldType.STRING)})
 
     with pytest.raises(LunaSchemaRejectedError):
-        admin.add_unique_key(db, "t", "papel")
-    schema = admin.add_unique_key(db, "t", "papel", force=True)
-    assert ("papel",) in schema.unique
+        admin.add_unique_key(db, "t", "role")
+    schema = admin.add_unique_key(db, "t", "role", force=True)
+    assert ("role",) in schema.unique
     with pytest.raises(LunaBadRequestError):
-        admin.add_unique_key(db, "t", "inexistente")
-    schema = admin.remove_unique_key(db, "t", "papel")
-    assert ("papel",) not in schema.unique
+        admin.add_unique_key(db, "t", "does_not_exist")
+    schema = admin.remove_unique_key(db, "t", "role")
+    assert ("role",) not in schema.unique
 
     with pytest.raises(LunaBadRequestError):
-        admin.add_schema_fields(db, "t", {"ativo": Field(FieldType.BOOL)})
+        admin.add_schema_fields(db, "t", {"active": Field(FieldType.BOOL)})
     with pytest.raises(LunaBadRequestError):
-        admin.remove_schema_fields(db, "t", "nao_existe")
+        admin.remove_schema_fields(db, "t", "does_not_exist")
     with pytest.raises(LunaBadRequestError):
-        admin.update_schema_field(db, "t", "nao_existe", {"required": True})
+        admin.update_schema_field(db, "t", "does_not_exist", {"required": True})
 
-    schema = admin.remove_schema_fields(db, "t", "ativo")
-    assert "ativo" not in schema.fields
+    schema = admin.remove_schema_fields(db, "t", "active")
+    assert "active" not in schema.fields
 
     schema = admin.patch_schema(
         db, "t", {"add": {"n": {"type": "int"}}, "strict": False}
@@ -287,11 +287,44 @@ def test_schema_patch_sdk(admin, db):
         db,
         "t",
         {
-            "add": {"composto": {"type": "string"}, "email": {"type": "string"}},
-            "unique_add": [["email", "composto"]],
+            "add": {"composite": {"type": "string"}, "email": {"type": "string"}},
+            "unique_add": [["email", "composite"]],
         },
     )
-    assert ("email", "composto") in fresh.unique
+    assert ("email", "composite") in fresh.unique
+
+
+def test_patch_aggregate_and_password(admin, db):
+    admin.create_table(db, "sales")
+    admin.create_record(db, "sales", {"city": "SP", "value": 10, "notes": "a"})
+    admin.create_record(db, "sales", {"city": "SP", "value": 20})
+    admin.create_record(db, "sales", {"city": "RJ", "value": 5})
+    record = admin.create_record(db, "sales", {"city": "RJ", "value": 7, "notes": "b"})
+
+    patched = admin.patch_record(db, "sales", record["_id"], {"value": 8, "notes": None})
+    assert patched["value"] == 8 and "notes" not in patched
+
+    groups = admin.aggregate(
+        db,
+        "sales",
+        group_by=["city"],
+        aggregates={
+            "n": "count",
+            "sum": "sum:value",
+            "avg": {"op": "avg", "field": "value"},
+        },
+    )
+    sp = next(group for group in groups if group["key"]["city"] == "SP")
+    assert sp["n"] == 2 and sp["sum"] == 30 and sp["avg"] == 15
+
+    user = admin.create_user(f"pw{uuid_suffix()}", "initial123")
+    client = LunaClient(base_url=admin.base_url)
+    client.login(user.username, "initial123")
+    client.set_password(user.id, "newpassword123", current_password="initial123")
+    with pytest.raises(LunaAuthError):
+        client.me()
+    client.login(user.username, "newpassword123")
+    admin.delete_user(user.id)
 
 
 def test_users_and_permissions(admin, db):
@@ -320,7 +353,7 @@ def test_users_and_permissions(admin, db):
     writer_client.login(writer.username, "writer12345")
     writer_client.create_record(db, "notes", {"x": 2})
     with pytest.raises(LunaForbiddenError):
-        writer_client.create_db("nao-pode")
+        writer_client.create_db("cannot-create")
     with pytest.raises(LunaForbiddenError):
         writer_client.list_users()
 

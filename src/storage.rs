@@ -1,5 +1,5 @@
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +92,12 @@ mod tests {
     fn msgpack_and_json_roundtrip() {
         let value = json!({
             "name": "users",
-            "records": {"abc": {"nome": "Ana", "tags": ["a", "b"], "ok": true}},
+            "records": {"abc": {"name": "Ana", "tags": ["a", "b"], "ok": true}},
         });
         for format in [Format::Msgpack, Format::Json] {
             let encoded = encode(format, &value).unwrap();
             let decoded: serde_json::Value = decode(format, &encoded).unwrap();
-            assert_eq!(decoded, value, "roundtrip falhou para {format:?}");
+            assert_eq!(decoded, value, "roundtrip failed for {format:?}");
         }
     }
 
@@ -107,6 +107,6 @@ mod tests {
         assert_eq!(format_of(Path::new("users.msgpack")), Format::Msgpack);
         assert_eq!(format_of(Path::new("users")), Format::Msgpack);
         assert_eq!(Format::from_name("json").extension(), "json");
-        assert_eq!(Format::from_name("qualquer").extension(), "msgpack");
+        assert_eq!(Format::from_name("anything").extension(), "msgpack");
     }
 }

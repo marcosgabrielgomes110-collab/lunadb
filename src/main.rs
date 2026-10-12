@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "lunadb", version, about = "Banco de dados JSON/MessagePack via API")]
+#[command(name = "lunadb", version, about = "JSON/MessagePack database via API")]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -80,12 +80,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Init => {
             let _guard = init_logging(&paths, &config)?;
-            runtime()?.block_on(async {
-                bootstrap::init(&paths, &mut config, &config_path).await
-            })?;
-            println!("LunaDB inicializado em {}", paths.home.display());
+            runtime()?
+                .block_on(async { bootstrap::init(&paths, &mut config, &config_path).await })?;
+            println!("LunaDB initialized at {}", paths.home.display());
             println!(
-                "root: {} (senha definida em {})",
+                "root: {} (password set in {})",
                 config.root.username,
                 config_path.display()
             );
@@ -99,7 +98,7 @@ fn main() -> anyhow::Result<()> {
         Command::ApiKey { action } => {
             let base_url = server_override.unwrap_or_else(|| default_base_url(&config));
             let key = key_override.ok_or_else(|| {
-                anyhow::anyhow!("informe --key ou defina LUNADB_API_KEY para gerenciar api keys")
+                anyhow::anyhow!("provide --key or set LUNADB_API_KEY to manage api keys")
             })?;
             run_apikey(base_url, key, action)
         }
@@ -113,7 +112,7 @@ fn log_startup(
     created_config: bool,
 ) {
     if created_config {
-        tracing::info!(path = %config_path.display(), "config criado");
+        tracing::info!(path = %config_path.display(), "config created");
     }
     tracing::info!(
         target: "lunadb::ops",
@@ -121,7 +120,7 @@ fn log_startup(
         storage = %paths.home.display(),
         config = %config_path.display(),
         log_file = %paths.log_file().display(),
-        "lunadb iniciando"
+        "lunadb starting"
     );
 }
 
@@ -138,8 +137,7 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let keyring = std::sync::Arc::new(crypto::Keyring::load(&paths, &config)?);
-    let state =
-        state::AppState::new(paths.clone(), keyring, config.clone(), config_path);
+    let state = state::AppState::new(paths.clone(), keyring, config.clone(), config_path);
     write_status(&state).await?;
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -147,7 +145,7 @@ async fn serve(
         target: "lunadb::ops",
         host = %config.server.host,
         port = config.server.port,
-        "LunaDB ouvindo em http://{addr}"
+        "LunaDB listening on http://{addr}"
     );
     let app = api::router(state);
     axum::serve(
@@ -158,9 +156,9 @@ async fn serve(
     .await?;
 
     if let Err(err) = tokio::fs::remove_file(paths.status_file()).await {
-        tracing::warn!("falha ao remover {}: {err}", paths.status_file().display());
+        tracing::warn!("failed to remove {}: {err}", paths.status_file().display());
     }
-    tracing::info!(target: "lunadb::ops", "LunaDB encerrado");
+    tracing::info!(target: "lunadb::ops", "LunaDB stopped");
     Ok(())
 }
 
@@ -180,7 +178,7 @@ async fn write_status(state: &state::AppState) -> anyhow::Result<()> {
     storage::write_json(&state.paths.status_file(), &info).await?;
     tracing::debug!(
         path = %state.paths.status_file().display(),
-        "status registrado"
+        "status recorded"
     );
     Ok(())
 }
@@ -189,23 +187,23 @@ fn migrate_command(paths: &config::Paths, to: &str, force: bool) -> anyhow::Resu
     let target = match to {
         "json" => storage::Format::Json,
         "msgpack" => storage::Format::Msgpack,
-        other => bail!("formato invalido: '{other}' (use json ou msgpack)"),
+        other => bail!("invalid format: '{other}' (use json or msgpack)"),
     };
     if !force && server_running(paths) {
         bail!(
-            "servidor parece estar rodando ({}); pare antes de migrar ou use --force",
+            "server appears to be running ({}); stop it before migrating or use --force",
             paths.status_file().display()
         );
     }
     let report = runtime()?.block_on(engine::migrate_tables(paths, target))?;
     println!(
-        "tabelas convertidas: {} | ja no formato {}: {}",
+        "converted tables: {} | already in format {}: {}",
         report.converted.len(),
         target.extension(),
         report.skipped.len()
     );
     for label in &report.converted {
-        println!("  convertida: {label}");
+        println!("  converted: {label}");
     }
     Ok(())
 }
@@ -272,7 +270,7 @@ fn resolve_user_id(client: &mut http_client::Client, username: &str) -> anyhow::
                 .and_then(|user| user["id"].as_str())
         })
         .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("usuario '{username}' nao encontrado"))
+        .ok_or_else(|| anyhow::anyhow!("user '{username}' not found"))
 }
 
 fn default_base_url(config: &config::Config) -> String {
@@ -356,7 +354,7 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!("sinal de encerramento recebido");
+    tracing::info!("shutdown signal received");
 }
 
 fn resolve_config_path(cli: &Cli) -> PathBuf {

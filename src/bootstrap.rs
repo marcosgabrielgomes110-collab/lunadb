@@ -2,7 +2,7 @@ use crate::auth;
 use crate::config::{Config, Paths};
 use crate::crypto;
 use crate::models::{
-    ApiKey, Grant, Level, Role, User, UsersFile, RolesFile, ROLE_ADMIN, ROLE_USER,
+    ApiKey, Grant, Level, ROLE_ADMIN, ROLE_USER, Role, RolesFile, User, UsersFile,
 };
 use crate::storage;
 use chrono::Utc;
@@ -11,18 +11,14 @@ use uuid::Uuid;
 
 pub const PASSWORD_HASH_PREFIX: &str = "$argon2";
 
-pub async fn init(
-    paths: &Paths,
-    config: &mut Config,
-    config_path: &Path,
-) -> anyhow::Result<()> {
+pub async fn init(paths: &Paths, config: &mut Config, config_path: &Path) -> anyhow::Result<()> {
     paths.ensure().await?;
     ensure_master_key(paths, config).await?;
     ensure_roles(paths).await?;
     if ensure_hashed_root_password(config, config_path)? {
         tracing::info!(
             path = %config_path.display(),
-            "senha do root no config estava em texto claro e foi criptografada (argon2id)"
+            "root password in config was in plaintext and has been hashed (argon2id)"
         );
     }
     ensure_root(paths, config).await?;
@@ -38,7 +34,7 @@ pub fn ensure_hashed_root_password(
     let trimmed = raw.trim();
     if trimmed.starts_with(PASSWORD_HASH_PREFIX) {
         argon2::password_hash::phc::PasswordHash::new(trimmed).map_err(|err| {
-            anyhow::anyhow!("root.password do config nao e um hash argon2 valido: {err}")
+            anyhow::anyhow!("root.password in config is not a valid argon2 hash: {err}")
         })?;
         if trimmed != raw {
             config.root.password = trimmed.to_string();
@@ -47,12 +43,14 @@ pub fn ensure_hashed_root_password(
         return Ok(false);
     }
     if raw == "changeme" {
-        tracing::warn!("a senha do root ainda e o padrao 'changeme', altere no config");
+        tracing::warn!(
+            "the root password is still the default 'changeme', change it in the config"
+        );
     }
     config.root.password = auth::hash_password(&raw)?;
     config.save(config_path)?;
     if let Err(err) = crypto::set_private_permissions(config_path) {
-        tracing::warn!("falha ao ajustar permissoes do config: {err}");
+        tracing::warn!("failed to adjust config permissions: {err}");
     }
     Ok(true)
 }
@@ -77,23 +75,23 @@ async fn migrate_legacy_api_keys(paths: &Paths) -> anyhow::Result<()> {
     }
     if migrated > 0 {
         storage::write_json(&paths.users_file(), &users).await?;
-        tracing::info!("{migrated} api key(s) legada(s) migrada(s) para o novo formato");
+        tracing::info!("{migrated} legacy api key(s) migrated to the new format");
     }
     Ok(())
 }
 
 async fn ensure_master_key(paths: &Paths, config: &Config) -> anyhow::Result<()> {
     if std::env::var("LUNADB_MASTER_KEY").is_ok() {
-        tracing::info!("master key carregada da variavel LUNADB_MASTER_KEY");
+        tracing::info!("master key loaded from LUNADB_MASTER_KEY variable");
         return Ok(());
     }
     let path = crypto::master_key_path(paths, config);
     if !path.exists() {
         crypto::write_master_key(&path)?;
-        tracing::info!("master key criada em {}", path.display());
+        tracing::info!("master key created at {}", path.display());
     } else if !crypto::has_private_permissions(&path) {
         tracing::warn!(
-            "permissoes da master key em {} sao amplas, recomendado chmod 600",
+            "master key permissions at {} are broad, chmod 600 recommended",
             path.display()
         );
     }
@@ -106,7 +104,7 @@ async fn ensure_roles(paths: &Paths) -> anyhow::Result<()> {
         roles.roles = vec![
             Role {
                 name: ROLE_ADMIN.to_string(),
-                description: "acesso total a todos os dbs e gestao de usuarios".to_string(),
+                description: "full access to all dbs and user management".to_string(),
                 builtin: true,
                 permissions: vec![Grant {
                     db: "*".to_string(),
@@ -115,13 +113,13 @@ async fn ensure_roles(paths: &Paths) -> anyhow::Result<()> {
             },
             Role {
                 name: ROLE_USER.to_string(),
-                description: "usuario padrao, acesso somente via grants".to_string(),
+                description: "default user, access only via grants".to_string(),
                 builtin: true,
                 permissions: Vec::new(),
             },
         ];
         storage::write_json(&paths.roles_file(), &roles).await?;
-        tracing::info!("roles padrao criadas (admin, user)");
+        tracing::info!("default roles created (admin, user)");
     }
     Ok(())
 }
@@ -139,7 +137,7 @@ async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
                 user.password_hash = configured_hash;
                 storage::write_json(&paths.users_file(), &users).await?;
                 tracing::info!(
-                    "senha do root '{}' sincronizada com o config",
+                    "root password '{}' synced with config",
                     config.root.username
                 );
             }
@@ -157,7 +155,7 @@ async fn ensure_root(paths: &Paths, config: &Config) -> anyhow::Result<()> {
             };
             users.users.push(root);
             storage::write_json(&paths.users_file(), &users).await?;
-            tracing::info!("usuario root '{}' criado", config.root.username);
+            tracing::info!("root user '{}' created", config.root.username);
         }
     }
     Ok(())
@@ -172,17 +170,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = Config::default();
-        config.root.password = "segredo".to_string();
+        config.root.password = "secret".to_string();
 
         assert!(ensure_hashed_root_password(&mut config, &path).unwrap());
         assert!(config.root.password.starts_with(PASSWORD_HASH_PREFIX));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains(PASSWORD_HASH_PREFIX));
-        assert!(!saved.contains("segredo"));
+        assert!(!saved.contains("secret"));
 
         let before = config.root.password.clone();
         assert!(!ensure_hashed_root_password(&mut config, &path).unwrap());
-        assert_eq!(config.root.password, before, "idempotente");
+        assert_eq!(config.root.password, before, "idempotent");
     }
 
     #[test]
@@ -201,7 +199,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = Config::default();
-        config.root.password = "$argon2id$isso-nao-e-valido".to_string();
+        config.root.password = "$argon2id$this-is-not-valid".to_string();
         assert!(ensure_hashed_root_password(&mut config, &path).is_err());
     }
 }

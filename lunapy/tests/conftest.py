@@ -26,7 +26,7 @@ def _wait_health(base_url: str, process: subprocess.Popen, timeout: float = 15.0
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("servidor morreu durante o boot")
+            raise RuntimeError("server died during boot")
         try:
             with urllib.request.urlopen(base_url + "/health", timeout=0.5) as response:
                 if response.status == 200:
@@ -34,14 +34,14 @@ def _wait_health(base_url: str, process: subprocess.Popen, timeout: float = 15.0
         except Exception:
             time.sleep(0.1)
     process.kill()
-    raise RuntimeError("servidor nao respondeu /health a tempo")
+    raise RuntimeError("server did not respond to /health in time")
 
 
 @pytest.fixture(scope="session")
 def server(tmp_path_factory: pytest.TempPathFactory) -> dict:
     binary = Path(os.environ.get("LUNADB_BIN", REPO_ROOT / "target" / "debug" / "lunadb"))
     if not binary.exists():
-        pytest.skip(f"binario nao encontrado em {binary} (rode cargo build)")
+        pytest.skip(f"binary not found at {binary} (run cargo build)")
 
     home = tmp_path_factory.mktemp("lunadb")
     storage = home / "storage"

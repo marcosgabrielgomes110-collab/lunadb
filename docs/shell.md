@@ -1,78 +1,78 @@
-# Shell e CLI
+# Shell and CLI
 
-> Veja também: [API HTTP](api.md) · [SDK Python](sdk.md)
+> See also: [HTTP API](api.md) · [Python SDK](sdk.md)
 
-O binário `lunadb` tem dois usos:
+The `lunadb` binary has two uses:
 
-1. **Servidor**: `lunadb serve` (default), `lunadb init`, `lunadb migrate`.
-2. **Cliente**: `lunadb shell` (REPL) e `lunadb apikey ...` (script/CI).
+1. **Server**: `lunadb serve` (default), `lunadb init`, `lunadb migrate`.
+2. **Client**: `lunadb shell` (REPL) and `lunadb apikey ...` (script/CI).
 
-## Flags globais
+## Global flags
 
-| Flag | Descrição |
+| Flag | Description |
 |---|---|
-| `--config <path>` | caminho do `config.toml` (default `~/.lunadb/config.toml`; env `LUNADB_CONFIG`) |
-| `--server <url>` | URL da API para comandos cliente (default: `http://{host}:{port}` do config) |
-| `--key <key>` | API key para comandos cliente (env `LUNADB_API_KEY`) |
+| `--config <path>` | path to `config.toml` (default `~/.lunadb/config.toml`; env `LUNADB_CONFIG`) |
+| `--server <url>` | API URL for client commands (default: `http://{host}:{port}` from the config) |
+| `--key <key>` | API key for client commands (env `LUNADB_API_KEY`) |
 
-Variáveis de ambiente: `LUNADB_CONFIG`, `LUNADB_API_KEY`, `LUNADB_MASTER_KEY`, `RUST_LOG`.
+Environment variables: `LUNADB_CONFIG`, `LUNADB_API_KEY`, `LUNADB_MASTER_KEY`, `RUST_LOG`.
 
-## Servidor
-
-```bash
-lunadb init      # cria ~/.lunadb (config, roles, root, master key) e sai
-lunadb serve     # sobe a API (Ctrl+C/SIGTERM encerram de forma graciosa)
-```
-
-## Comandos de API key (não-interativos)
+## Server
 
 ```bash
-export LUNADB_API_KEY=luna_...    # key de um admin
-
-lunadb apikey create bob --name ci      # imprime a key nova (uma única vez)
-lunadb apikey list bob                  # JSON das keys do bob
-lunadb apikey list                      # JSON das próprias keys
-lunadb apikey revoke bob luna_abc123    # por id ou prefixo
+lunadb init      # creates ~/.lunadb (config, roles, root, master key) and exits
+lunadb serve     # starts the API (Ctrl+C/SIGTERM shut down gracefully)
 ```
 
-Saída de `create` é apenas a key (para `$()` em scripts); `list`/`revoke` retornam JSON.
+## API key commands (non-interactive)
 
-## Migração de formato (offline)
+```bash
+export LUNADB_API_KEY=luna_...    # an admin's key
 
-Converte todas as tabelas entre MessagePack (default) e JSON. Exige servidor parado
-(detecta via `infra/status.json` + pid; use `--force` para ignorar a checagem).
+lunadb apikey create bob --name ci      # prints the new key (only once)
+lunadb apikey list bob                  # JSON of bob's keys
+lunadb apikey list                      # JSON of your own keys
+lunadb apikey revoke bob luna_abc123    # by id or prefix
+```
+
+`create` output is just the key (for `$()` in scripts); `list`/`revoke` return JSON.
+
+## Format migration (offline)
+
+Converts all tables between MessagePack (default) and JSON. Requires the server stopped
+(detected via `infra/status.json` + pid; use `--force` to skip the check).
 
 ```bash
 lunadb migrate --to json
 lunadb migrate --to msgpack --force
 ```
 
-## Shell interativo
+## Interactive shell
 
 ```bash
 lunadb shell
 lunadb shell --server http://127.0.0.1:7700 --key luna_...
 ```
 
-- Histórico persistido em `~/.lunadb/infra/shell_history`.
-- `login` sem senha usa prompt oculto (rpassword).
-- JSON sempre entre **aspas simples** (o parser remove as duplas):
-  `add app notas '{"titulo":"oi"}'`.
-- `exit`/`quit` (ou Ctrl+D) saem.
+- History persisted in `~/.lunadb/infra/shell_history`.
+- `login` without a password uses a hidden prompt (rpassword).
+- JSON always between **single quotes** (the parser strips the double quotes):
+  `add app notes '{"title":"hi"}'`.
+- `exit`/`quit` (or Ctrl+D) quit.
 
-### Sessão e diagnóstico
+### Session and diagnostics
 
-| Comando | Exemplo |
+| Command | Example |
 |---|---|
-| `login <user> [senha]` | `login root` (pede a senha) |
-| `whoami` | retorna o `UserPublic` atual |
-| `status` | pid, uptime, host/porta, contagens |
-| `key rotate` | rotaciona a chave `login` e exibe a nova |
-| `help` | lista os comandos |
+| `login <user> [password]` | `login root` (prompts for the password) |
+| `whoami` | returns the current `UserPublic` |
+| `status` | pid, uptime, host/port, counts |
+| `key rotate` | rotates the `login` key and shows the new one |
+| `help` | lists the commands |
 
-### Databases e tabelas
+### Databases and tables
 
-| Comando | Exemplo |
+| Command | Example |
 |---|---|
 | `dbs` | `dbs` |
 | `db create <db>` | `db create app` |
@@ -83,72 +83,74 @@ lunadb shell --server http://127.0.0.1:7700 --key luna_...
 
 ### Schema
 
-| Comando | Exemplo |
+| Command | Example |
 |---|---|
 | `schema get <db> <t>` | `schema get app users` |
 | `schema set <db> <t> <json> [--force]` | `schema set app users '{"fields":{...}}' --force` |
 | `schema patch <db> <t> <json> [--force]` | `schema patch app users '{"add":{"tel":{"type":"string"}}}'` |
-| `schema add-field <db> <t> <nome> <json> [--force]` | `schema add-field app users tel '{"type":"string","default":""}'` |
-| `schema rm-field <db> <t> <campo>... [--force]` | `schema rm-field app users antigo outro` |
-| `schema update-field <db> <t> <campo> <json> [--force]` | `schema update-field app users email '{"required":true,"max":null}'` |
-| `schema unique add <db> <t> <chave> [--force]` | `schema unique add app users tenant+email` |
-| `schema unique rm <db> <t> <chave> [--force]` | `schema unique rm app users cpf` |
-| `schema rm <db> <t>` | remove o schema inteiro |
+| `schema add-field <db> <t> <name> <json> [--force]` | `schema add-field app users tel '{"type":"string","default":""}'` |
+| `schema rm-field <db> <t> <field>... [--force]` | `schema rm-field app users old another` |
+| `schema update-field <db> <t> <field> <json> [--force]` | `schema update-field app users email '{"required":true,"max":null}'` |
+| `schema unique add <db> <t> <key> [--force]` | `schema unique add app users tenant+email` |
+| `schema unique rm <db> <t> <key> [--force]` | `schema unique rm app users cpf` |
+| `schema rm <db> <t>` | removes the entire schema |
 
-Todas funcionam mesmo se a tabela ainda não tiver schema (criam do zero). Sem `--force`,
-registros que violem o novo schema retornam `erro: HTTP 409 ...` com os ids.
+All work even if the table has no schema yet (they create it from scratch). Without `--force`,
+records that violate the new schema return `error: HTTP 409 ...` with the ids.
 
-### Registros e query
+### Records and query
 
-| Comando | Exemplo |
+| Command | Example |
 |---|---|
 | `list <db> <t> [limit] [offset]` | `list app users 10 0` |
 | `get <db> <t> <id>` | `get app users 0f045bbf-...` |
 | `add <db> <t> '<json>'` | `add app users '{"email":"a@x.com"}'` |
 | `put <db> <t> <id> '<json>'` | `put app users <id> '{"email":"b@x.com"}'` |
+| `patch <db> <t> <id> '<json>'` | `patch app users <id> '{"age":31,"tel":null}'` |
 | `rm <db> <t> <id>` | `rm app users <id>` |
-| `query <db> <t> '<json>'` | `query app users '{"filter":{"idade":{"$gte":18}},"sort":["-idade"]}'` |
+| `query <db> <t> '<json>'` | `query app users '{"filter":{"age":{"$gte":18}},"sort":["-age"]}'` |
+| `aggregate <db> <t> '<json>'` | `aggregate app users '{"group_by":["city"],"aggregates":{"n":{"op":"count"}}}'` |
 
-### Usuários, grants e API keys
+### Users, grants, and API keys
 
-| Comando | Exemplo |
+| Command | Example |
 |---|---|
-| `users` | lista usuários (admin) |
-| `user add <user> <senha> [role] [db:level ...]` | `user add bob bob12345 user app:write` |
+| `users` | lists users (admin) |
+| `user add <user> <password> [role] [db:level ...]` | `user add bob bob12345 user app:write` |
 | `user rm <id>` | `user rm 3d717770-...` |
 | `grants <user-id> '<json>'` | `grants <id> '[{"db":"app","level":"read"}]'` |
-| `apikey create <user> [--name <nome>]` | `apikey create bob --name ci` |
-| `apikey list [user]` | `apikey list bob` (sem user = próprias) |
-| `apikey revoke <user> <id\|prefixo>` | `apikey revoke bob luna_abc123` |
+| `apikey create <user> [--name <name>]` | `apikey create bob --name ci` |
+| `apikey list [user]` | `apikey list bob` (without user = your own) |
+| `apikey revoke <user> <id\|prefix>` | `apikey revoke bob luna_abc123` |
 
-### Exemplo de sessão
+### Example session
 
 ```
 $ lunadb shell
-LunaDB shell (http://127.0.0.1:7700) - 'help' para comandos, 'exit' para sair
+LunaDB shell (http://127.0.0.1:7700) - 'help' for commands, 'exit' to quit
 lunadb> login root
-senha de root:
-logado como root
+password for root:
+logged in as root
 lunadb> db create app
-db 'app' criado
-lunadb> table create app notas '{"fields":{"titulo":{"type":"string","required":true}}}'
-tabela 'app.notas' criada
-lunadb> add app notas '{"titulo":"primeira nota"}'
+db 'app' created
+lunadb> table create app notes '{"fields":{"title":{"type":"string","required":true}}}'
+table 'app.notes' created
+lunadb> add app notes '{"title":"first note"}'
 {
   "_id": "0f045bbf-5a9a-43b5-81b4-46d9758c9721",
-  "titulo": "primeira nota"
+  "title": "first note"
 }
-lunadb> query app notas '{"filter":{"titulo":{"$contains":"primeira"}},"fields":["titulo"]}'
+lunadb> query app notes '{"filter":{"title":{"$contains":"first"}},"fields":["title"]}'
 {
   "count": 1,
   "db": "app",
-  "records": [ { "_id": "...", "titulo": "primeira nota" } ],
-  "table": "notas",
+  "records": [ { "_id": "...", "title": "first note" } ],
+  "table": "notes",
   "total": 1
 }
 lunadb> apikey create root --name console
-api key criada (guarde agora): luna_4a7973...
+api key created (save it now): luna_4a7973...
 lunadb> exit
 ```
 
-Os erros aparecem como `erro: HTTP 403: ...`, sem encerrar a sessão.
+Errors appear as `error: HTTP 403: ...`, without ending the session.

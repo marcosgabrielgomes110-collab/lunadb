@@ -2,6 +2,15 @@
 name = "lunadb"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.85"
+description = "A JSON/MessagePack document database exposed as an HTTP API"
+license = "MIT"
+authors = ["Marcos Gabriel Gomes <marcosgabrielgomes110@gmail.com>"]
+repository = "https://github.com/marcosgabrielgomes110-collab/lunadb"
+homepage = "https://github.com/marcosgabrielgomes110-collab/lunadb"
+readme = "README.md"
+keywords = ["database", "json", "http", "api", "axum"]
+categories = ["database", "web-programming::http-server"]
 
 [dependencies]
 aes-gcm = "0.11"
@@ -25,7 +34,7 @@ shlex = "2.0.1"
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.8"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
 tracing = "0.1.44"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

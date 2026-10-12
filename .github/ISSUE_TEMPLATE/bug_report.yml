@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible problem with LunaDB
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. For security issues,
+        please follow the instructions in SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: LunaDB version
+      description: Output of `lunadb --version` (or the commit SHA).
+      placeholder: "0.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Server / HTTP API
+        - CLI / shell
+        - Schema engine
+        - Storage / crypto
+        - Python SDK
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust/Python version, and how you run the server.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Rust: 1.85
+        Python: 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, deterministic steps.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include logs or error output. Redact secrets.
+    validations:
+      required: true

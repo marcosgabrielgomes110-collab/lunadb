@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::auth::{self, AuthUser};
 use crate::engine;
 use crate::error::AppError;
-use crate::models::{Grant, Role, User, UserPublic, UsersFile, ROLE_ADMIN, ROLE_USER};
+use crate::models::{Grant, ROLE_ADMIN, ROLE_USER, Role, User, UserPublic, UsersFile};
 use crate::state::AppState;
 use crate::storage;
 
@@ -25,6 +25,13 @@ pub struct CreateUserRequest {
 #[derive(Debug, Deserialize)]
 pub struct SetGrantsRequest {
     pub grants: Vec<Grant>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPasswordRequest {
+    pub password: String,
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 fn default_role() -> String {
@@ -50,13 +57,13 @@ pub async fn create(
     engine::validate_name(&req.username)?;
     if req.password.len() < 6 {
         return Err(AppError::BadRequest(
-            "senha deve ter ao menos 6 caracteres".to_string(),
+            "password must be at least 6 characters".to_string(),
         ));
     }
     let roles = engine::roles(&state).await?;
     if !roles.roles.iter().any(|role| role.name == req.role) {
         return Err(AppError::BadRequest(format!(
-            "role '{}' nao existe",
+            "role '{}' does not exist",
             req.role
         )));
     }
@@ -71,7 +78,7 @@ pub async fn create(
         .any(|candidate| candidate.username == req.username)
     {
         return Err(AppError::Conflict(format!(
-            "usuario '{}' ja existe",
+            "user '{}' already exists",
             req.username
         )));
     }
@@ -100,9 +107,7 @@ pub async fn delete(
 ) -> Result<StatusCode, AppError> {
     user.require_admin()?;
     if user.0.id == id {
-        return Err(AppError::BadRequest(
-            "nao e possivel remover a si mesmo".to_string(),
-        ));
+        return Err(AppError::BadRequest("cannot remove yourself".to_string()));
     }
     let _guard = state.lock.write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
@@ -110,7 +115,7 @@ pub async fn delete(
         .users
         .iter()
         .position(|candidate| candidate.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("usuario '{id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("user '{id}'")))?;
     let is_last_admin = users.users[index].role == ROLE_ADMIN
         && users
             .users
@@ -120,7 +125,7 @@ pub async fn delete(
             <= 1;
     if is_last_admin {
         return Err(AppError::Conflict(
-            "nao e possivel remover o ultimo administrador".to_string(),
+            "cannot remove the last administrator".to_string(),
         ));
     }
     let target_username = users.users[index].username.clone();
@@ -146,11 +151,74 @@ pub async fn set_grants(
         .users
         .iter_mut()
         .find(|candidate| candidate.id == id)
-        .ok_or_else(|| AppError::NotFound(format!("usuario '{id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("user '{id}'")))?;
     target.grants = req.grants;
     let public = UserPublic::from(&*target);
     storage::write_json(&state.paths.users_file(), &users).await?;
     tracing::info!(target: "lunadb::ops", op = %"set_grants", user = %user.0.username, target = %public.username, grants = public.grants.len());
+    Ok(Json(public))
+}
+
+pub async fn set_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<SetPasswordRequest>,
+) -> Result<Json<UserPublic>, AppError> {
+    if req.password.chars().count() < 6 {
+        return Err(AppError::BadRequest(
+            "password must be at least 6 characters".to_string(),
+        ));
+    }
+    let is_self = user.0.id == id;
+    if !is_self {
+        user.require_admin()?;
+    }
+    let _guard = state.lock.write().await;
+    let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
+    if is_self && user.0.role != ROLE_ADMIN {
+        let current = req.current_password.as_deref().ok_or_else(|| {
+            AppError::BadRequest("provide current_password to change your own password".to_string())
+        })?;
+        let target = users
+            .users
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("user '{id}'")))?;
+        if !auth::verify_password(current, &target.password_hash) {
+            return Err(AppError::Unauthorized);
+        }
+    }
+    let (public, username, new_hash) = {
+        let target = users
+            .users
+            .iter_mut()
+            .find(|candidate| candidate.id == id)
+            .ok_or_else(|| AppError::NotFound(format!("user '{id}'")))?;
+        let hash = auth::hash_password(&req.password)?;
+        target.password_hash = hash.clone();
+        let now = Utc::now();
+        for key in target.api_keys.iter_mut() {
+            auth::revoke_key(key, now);
+        }
+        (UserPublic::from(&*target), target.username.clone(), hash)
+    };
+    storage::write_json(&state.paths.users_file(), &users).await?;
+    // keeps the config in sync when the root password changes (bootstrap re-syncs)
+    if username == state.config.root.username {
+        match crate::config::Config::load(&state.config_path) {
+            Ok(mut config) => {
+                config.root.password = new_hash;
+                if let Err(err) = config.save(&state.config_path) {
+                    tracing::warn!("failed to sync root password in config: {err}");
+                }
+            }
+            Err(err) => {
+                tracing::warn!("failed to load config to sync root: {err}");
+            }
+        }
+    }
+    tracing::info!(target: "lunadb::ops", op = %"set_password", user = %user.0.username, target = %public.username);
     Ok(Json(public))
 }
 

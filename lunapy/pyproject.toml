@@ -5,9 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lunapy"
 version = "0.0.1"
-description = "SDK Python para o LunaDB"
+description = "Python SDK for LunaDB"
 requires-python = ">=3.11"
 dependencies = []
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/marcosgabrielgomes110-collab/lunadb"
+Documentation = "https://github.com/marcosgabrielgomes110-collab/lunadb/blob/main/docs/sdk.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

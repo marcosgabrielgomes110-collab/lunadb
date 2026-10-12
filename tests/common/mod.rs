@@ -21,7 +21,7 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn spawn() -> Self {
-        let dir = tempfile::tempdir().expect("criar tempdir");
+        let dir = tempfile::tempdir().expect("create tempdir");
         let mut config = Config::default();
         config.storage.path = dir.path().to_string_lossy().to_string();
         config.root.password = "test-secret".to_string();
@@ -86,7 +86,7 @@ impl TestServer {
                 Some(serde_json::json!({"username": username, "password": password})),
             )
             .await;
-        assert_eq!(status, StatusCode::OK, "login falhou: {body}");
+        assert_eq!(status, StatusCode::OK, "login failed: {body}");
         body["api_key"].as_str().unwrap().to_string()
     }
 

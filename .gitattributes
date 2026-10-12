@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+*.rs       text diff=rust
+*.toml     text
+*.md       text
+*.py       text
+Makefile   text
+
+*.msgpack  binary
+*.png      binary
+*.jpg      binary
+*.gif      binary
+
+Cargo.lock linguist-generated=true

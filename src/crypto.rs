@@ -25,15 +25,14 @@ impl Keyring {
 
     pub fn load(paths: &Paths, config: &Config) -> anyhow::Result<Self> {
         if let Ok(value) = std::env::var("LUNADB_MASTER_KEY") {
-            let master = parse_master_key(value.trim()).context("LUNADB_MASTER_KEY invalida")?;
+            let master = parse_master_key(value.trim()).context("invalid LUNADB_MASTER_KEY")?;
             return Ok(Self { master });
         }
         let path = master_key_path(paths, config);
-        let raw = std::fs::read_to_string(&path).with_context(|| {
-            format!("falha ao ler master key em {}", path.display())
-        })?;
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read master key at {}", path.display()))?;
         let master = parse_master_key(raw.trim())
-            .with_context(|| format!("master key invalida em {}", path.display()))?;
+            .with_context(|| format!("invalid master key at {}", path.display()))?;
         Ok(Self { master })
     }
 
@@ -41,7 +40,7 @@ impl Keyring {
         let hkdf = Hkdf::<Sha256>::new(Some(b"lunadb:v1"), &self.master);
         let mut key = [0u8; 32];
         hkdf.expand(format!("db:{db}").as_bytes(), &mut key)
-            .expect("tamanho de saida hkdf valido");
+            .expect("valid hkdf output size");
         key
     }
 
@@ -51,7 +50,7 @@ impl Keyring {
         let nonce = Nonce::<U12>::generate();
         let ciphertext = cipher
             .encrypt(&nonce, plaintext)
-            .map_err(|_| anyhow::anyhow!("falha ao cifrar"))?;
+            .map_err(|_| anyhow::anyhow!("failed to encrypt"))?;
         let mut blob = Vec::with_capacity(12 + ciphertext.len());
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&ciphertext);
@@ -61,20 +60,20 @@ impl Keyring {
     pub fn decrypt_bytes(&self, db: &str, token: &str) -> anyhow::Result<Vec<u8>> {
         let encoded = token
             .strip_prefix(ENC_PREFIX)
-            .context("valor nao esta no formato enc:v1")?;
-        let blob = STANDARD.decode(encoded).context("base64 invalido")?;
+            .context("value is not in enc:v1 format")?;
+        let blob = STANDARD.decode(encoded).context("invalid base64")?;
         if blob.len() < 12 {
-            bail!("ciphertext invalido");
+            bail!("invalid ciphertext");
         }
         let (nonce_bytes, ciphertext) = blob.split_at(12);
         let nonce: &Nonce<U12> = nonce_bytes
             .try_into()
-            .map_err(|_| anyhow::anyhow!("nonce invalido"))?;
+            .map_err(|_| anyhow::anyhow!("invalid nonce"))?;
         let key = Key::<Aes256Gcm>::from(self.db_key(db));
         let cipher = Aes256Gcm::new(&key);
         cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow::anyhow!("falha ao decifrar (chave errada ou dado corrompido)"))
+            .map_err(|_| anyhow::anyhow!("failed to decrypt (wrong key or corrupted data)"))
     }
 
     pub fn encrypt_value(&self, db: &str, value: &Value) -> anyhow::Result<Value> {
@@ -104,10 +103,10 @@ pub fn master_key_path(paths: &Paths, config: &Config) -> PathBuf {
 }
 
 pub fn parse_master_key(raw: &str) -> anyhow::Result<[u8; 32]> {
-    let bytes = hex::decode(raw).context("hex invalido")?;
+    let bytes = hex::decode(raw).context("invalid hex")?;
     bytes
         .try_into()
-        .map_err(|_| anyhow::anyhow!("master key deve ter 32 bytes (64 hex)"))
+        .map_err(|_| anyhow::anyhow!("master key must be 32 bytes (64 hex)"))
 }
 
 pub fn write_master_key(path: &Path) -> anyhow::Result<[u8; 32]> {
@@ -154,7 +153,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let keyring = Keyring::from_master([1u8; 32]);
-        let value = json!({"segredo": "valor", "numero": 42, "lista": [1, 2, 3]});
+        let value = json!({"secret": "value", "number": 42, "list": [1, 2, 3]});
         let token = keyring.encrypt_value("app", &value).unwrap();
         let token_str = token.as_str().unwrap();
         assert!(token_str.starts_with(ENC_PREFIX));
@@ -167,7 +166,7 @@ mod tests {
     #[test]
     fn decrypt_with_wrong_key_fails() {
         let token = Keyring::from_master([1u8; 32])
-            .encrypt_value("app", &json!("segredo"))
+            .encrypt_value("app", &json!("secret"))
             .unwrap();
         let token = token.as_str().unwrap().to_string();
         let other = Keyring::from_master([2u8; 32]);
@@ -195,7 +194,7 @@ mod tests {
     #[test]
     fn invalid_token_errors() {
         let keyring = Keyring::from_master([5u8; 32]);
-        assert!(keyring.decrypt_value("app", "texto-claro").is_err());
+        assert!(keyring.decrypt_value("app", "plain-text").is_err());
         assert!(keyring.decrypt_value("app", "enc:v1:bm90YQ==").is_err());
     }
 

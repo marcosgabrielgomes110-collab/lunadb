@@ -65,7 +65,7 @@ impl Client {
         let key = value
             .get("api_key")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("resposta de login sem api_key"))?;
+            .ok_or_else(|| anyhow!("login response without api_key"))?;
         self.set_api_key(key.to_string());
         Ok(value)
     }
@@ -74,10 +74,7 @@ impl Client {
         format!("{}{}", self.base_url, path)
     }
 
-    fn authorize<B>(
-        &self,
-        mut request: ureq::RequestBuilder<B>,
-    ) -> ureq::RequestBuilder<B> {
+    fn authorize<B>(&self, mut request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
         if let Some(key) = &self.api_key {
             request = request.header("authorization", format!("Bearer {key}"));
         }
@@ -88,13 +85,13 @@ impl Client {
         &self,
         response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> anyhow::Result<Value> {
-        let mut response = response
-            .map_err(|err| anyhow!("falha de conexao com {}: {err}", self.base_url))?;
+        let mut response =
+            response.map_err(|err| anyhow!("connection failure to {}: {err}", self.base_url))?;
         let status = response.status().as_u16();
         let text = response
             .body_mut()
             .read_to_string()
-            .context("falha ao ler resposta")?;
+            .context("failed to read response")?;
         if (200..300).contains(&status) {
             if text.is_empty() {
                 return Ok(Value::Null);

@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -22,19 +22,21 @@ pub struct RecordError {
 pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
-    #[error("api key ausente ou invalida")]
+    #[error("api key missing or invalid")]
     Unauthorized,
+    #[error("too many attempts; try again in {0}s")]
+    TooManyRequests(u64),
     #[error("{0}")]
     Forbidden(String),
-    #[error("{0} nao encontrado")]
+    #[error("{0} not found")]
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
-    #[error("validacao falhou")]
+    #[error("validation failed")]
     Validation(Vec<FieldError>),
-    #[error("valor duplicado (unique)")]
+    #[error("duplicate value (unique)")]
     UniqueViolation(Vec<FieldError>),
-    #[error("schema rejeitado pelos registros existentes")]
+    #[error("schema rejected by existing records")]
     SchemaRejected(Vec<RecordError>),
     #[error("{0}")]
     Crypto(String),
@@ -59,22 +61,35 @@ impl IntoResponse for AppError {
         match self {
             AppError::Validation(fields) => (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "validacao falhou", "fields": fields })),
+                Json(json!({ "error": "validation failed", "fields": fields })),
             )
                 .into_response(),
             AppError::UniqueViolation(fields) => (
                 StatusCode::CONFLICT,
-                Json(json!({ "error": "valor duplicado (unique)", "fields": fields })),
+                Json(json!({ "error": "duplicate value (unique)", "fields": fields })),
             )
                 .into_response(),
             AppError::SchemaRejected(records) => (
                 StatusCode::CONFLICT,
                 Json(json!({
-                    "error": "schema rejeitado pelos registros existentes",
+                    "error": "schema rejected by existing records",
                     "records": records,
                 })),
             )
                 .into_response(),
+            AppError::TooManyRequests(seconds) => {
+                let mut response = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({
+                        "error": format!("too many attempts; try again in {seconds}s"),
+                    })),
+                )
+                    .into_response();
+                if let Ok(value) = seconds.to_string().parse() {
+                    response.headers_mut().insert("retry-after", value);
+                }
+                response
+            }
             other => {
                 let status = match &other {
                     AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -86,11 +101,12 @@ impl IntoResponse for AppError {
                     AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
                     AppError::Validation(_)
                     | AppError::UniqueViolation(_)
-                    | AppError::SchemaRejected(_) => unreachable!(),
+                    | AppError::SchemaRejected(_)
+                    | AppError::TooManyRequests(_) => unreachable!(),
                 };
                 let message = other.to_string();
                 if status == StatusCode::INTERNAL_SERVER_ERROR {
-                    tracing::error!("erro interno: {message}");
+                    tracing::error!("internal error: {message}");
                 }
                 (status, Json(json!({ "error": message }))).into_response()
             }

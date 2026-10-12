@@ -1,9 +1,9 @@
 use crate::error::AppError;
-use crate::models::{ApiKey, UsersFile, ROLE_ADMIN};
+use crate::models::{ApiKey, ROLE_ADMIN, UsersFile};
 use crate::state::AppState;
 use crate::storage;
-use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -78,9 +78,7 @@ impl AuthUser {
         if self.0.role == ROLE_ADMIN {
             Ok(())
         } else {
-            Err(AppError::Forbidden(
-                "acao exclusiva de administradores".to_string(),
-            ))
+            Err(AppError::Forbidden("administrator-only action".to_string()))
         }
     }
 
@@ -111,15 +109,18 @@ impl FromRequestParts<AppState> for AuthUser {
             .trim();
         let wanted = hash_api_key(key);
         let users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
-        let matched = users.users.iter().enumerate().find_map(|(user_index, user)| {
-            user.api_keys
-                .iter()
-                .position(|api_key| {
-                    api_key.is_active()
-                        && api_key.key_hash.as_deref() == Some(wanted.as_str())
-                })
-                .map(|key_index| (user_index, key_index))
-        });
+        let matched = users
+            .users
+            .iter()
+            .enumerate()
+            .find_map(|(user_index, user)| {
+                user.api_keys
+                    .iter()
+                    .position(|api_key| {
+                        api_key.is_active() && api_key.key_hash.as_deref() == Some(wanted.as_str())
+                    })
+                    .map(|key_index| (user_index, key_index))
+            });
         let Some((user_index, key_index)) = matched else {
             return Err(AppError::Unauthorized);
         };
@@ -143,7 +144,11 @@ async fn touch_last_used(state: &AppState, user_id: &str, key_id: &str) {
     let Some(user) = users.users.iter_mut().find(|user| user.id == user_id) else {
         return;
     };
-    let Some(api_key) = user.api_keys.iter_mut().find(|api_key| api_key.id == key_id) else {
+    let Some(api_key) = user
+        .api_keys
+        .iter_mut()
+        .find(|api_key| api_key.id == key_id)
+    else {
         return;
     };
     api_key.last_used_at = Some(Utc::now());

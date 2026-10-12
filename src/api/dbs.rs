@@ -1,8 +1,8 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::engine;
@@ -77,8 +77,7 @@ pub async fn create_table(
     Path(db): Path<String>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    let table =
-        engine::create_table(&state, &user.0, &db, &req.name, req.schema).await?;
+    let table = engine::create_table(&state, &user.0, &db, &req.name, req.schema).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "db": db, "table": table })),

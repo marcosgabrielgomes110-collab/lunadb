@@ -53,7 +53,22 @@ def _normalize_schema(schema: Union[TableSchema, Mapping[str, Any]]) -> dict[str
         return schema.to_dict()
     if isinstance(schema, Mapping):
         return dict(schema)
-    raise LunaError("schema deve ser TableSchema ou dict")
+    raise LunaError("schema must be a TableSchema or dict")
+
+
+def _normalize_aggregate(
+    spec: Union[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Accepts {"op": "...", "field": "..."}, "count", or "sum:field"."""
+    if isinstance(spec, Mapping):
+        return dict(spec)
+    if not isinstance(spec, str):
+        raise LunaError("aggregate must be a dict or string")
+    op, _, field = spec.partition(":")
+    spec_dict: dict[str, Any] = {"op": op.strip()}
+    if field.strip():
+        spec_dict["field"] = field.strip()
+    return spec_dict
 
 
 def _normalize_sort(item: Union[Sort, Mapping[str, str], tuple[str, str], str]) -> dict[str, str]:
@@ -102,7 +117,7 @@ class LunaClient:
             path or os.environ.get("LUNADB_CONFIG") or DEFAULT_CONFIG_PATH
         ).expanduser()
         if not config_path.exists():
-            raise LunaError(f"config nao encontrado: {config_path}")
+            raise LunaError(f"config not found: {config_path}")
         with config_path.open("rb") as handle:
             data = tomllib.load(handle)
         server = data.get("server", {})
@@ -381,6 +396,64 @@ class LunaClient:
             body=dict(record),
         )
 
+    def patch_record(
+        self,
+        db: str,
+        table: str,
+        record_id: str,
+        patch: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._request(
+            "PATCH",
+            self._record_path(db, table, record_id),
+            body=dict(patch),
+        )
+
+    def aggregate(
+        self,
+        db: str,
+        table: str,
+        *,
+        aggregates: Mapping[str, Union[str, Mapping[str, Any]]],
+        group_by: Optional[Iterable[str]] = None,
+        filter: Optional[Mapping[str, Any]] = None,
+        limit: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {
+            "aggregates": {
+                name: _normalize_aggregate(spec)
+                for name, spec in aggregates.items()
+            }
+        }
+        if group_by is not None:
+            body["group_by"] = list(group_by)
+        if filter is not None:
+            body["filter"] = dict(filter)
+        if limit is not None:
+            body["limit"] = limit
+        data = self._request(
+            "POST",
+            f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records/aggregate",
+            body=body,
+        )
+        return list(data["groups"])
+
+    def set_password(
+        self,
+        user_id: str,
+        password: str,
+        current_password: Optional[str] = None,
+    ) -> User:
+        body: dict[str, Any] = {"password": password}
+        if current_password is not None:
+            body["current_password"] = current_password
+        data = self._request(
+            "PUT",
+            f"/users/{urllib.parse.quote(user_id)}/password",
+            body=body,
+        )
+        return User.from_dict(data)
+
     def query(
         self,
         db: str,
@@ -441,7 +514,7 @@ class LunaClient:
         if auth:
             if not self.api_key:
                 raise LunaError(
-                    "api_key nao definida; use login() ou informe api_key"
+                    "api_key not set; use login() or provide api_key"
                 )
             headers["Authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -454,7 +527,7 @@ class LunaClient:
             raise error_from_status(err.code, message, payload) from None
         except urllib.error.URLError as err:
             raise LunaConnectionError(
-                f"falha ao conectar em {self.base_url}: {err.reason}"
+                f"failed to connect to {self.base_url}: {err.reason}"
             ) from err
         if not raw:
             return None

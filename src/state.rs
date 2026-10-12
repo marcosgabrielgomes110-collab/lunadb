@@ -1,5 +1,7 @@
 use crate::config::{Config, Paths};
 use crate::crypto::Keyring;
+use crate::metrics::Metrics;
+use crate::ratelimit::LoginThrottle;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,15 +15,12 @@ pub struct AppState {
     pub config: Config,
     pub config_path: PathBuf,
     pub started_at: DateTime<Utc>,
+    pub metrics: Arc<Metrics>,
+    pub login: Arc<LoginThrottle>,
 }
 
 impl AppState {
-    pub fn new(
-        paths: Paths,
-        keyring: Arc<Keyring>,
-        config: Config,
-        config_path: PathBuf,
-    ) -> Self {
+    pub fn new(paths: Paths, keyring: Arc<Keyring>, config: Config, config_path: PathBuf) -> Self {
         Self {
             paths,
             lock: Arc::new(RwLock::new(())),
@@ -29,6 +28,8 @@ impl AppState {
             config,
             config_path,
             started_at: Utc::now(),
+            metrics: Arc::new(Metrics::default()),
+            login: Arc::new(LoginThrottle::new()),
         }
     }
 }

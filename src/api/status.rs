@@ -1,13 +1,24 @@
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::error::AppError;
 use crate::models::{DbsFile, UsersFile};
 use crate::state::AppState;
 use crate::storage;
+
+/// Metrics in Prometheus text format (aggregated counters, no sensitive data).
+pub async fn metrics(state: State<AppState>) -> impl IntoResponse {
+    let uptime = (Utc::now() - state.started_at).num_seconds().max(0);
+    (
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.render(env!("CARGO_PKG_VERSION"), uptime),
+    )
+}
 
 pub async fn status(
     State(state): State<AppState>,

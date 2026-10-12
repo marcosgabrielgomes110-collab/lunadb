@@ -20,7 +20,7 @@ async fn health_and_auth_flow() {
             "POST",
             "/auth/login",
             None,
-            Some(json!({"username": "root", "password": "errada"})),
+            Some(json!({"username": "root", "password": "wrong"})),
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -90,7 +90,7 @@ async fn users_and_permissions() {
             Some(&root),
             Some(json!({
                 "username": "bob",
-                "password": "outra12345"
+                "password": "other12345"
             })),
         )
         .await;
@@ -133,7 +133,7 @@ async fn users_and_permissions() {
             "POST",
             "/dbs/app/tables/notes/records",
             Some(&bob),
-            Some(json!({"titulo": "do bob"})),
+            Some(json!({"title": "from bob"})),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -143,7 +143,7 @@ async fn users_and_permissions() {
             "POST",
             "/dbs/app/tables/notes/records",
             Some(&carol),
-            Some(json!({"titulo": "da carol"})),
+            Some(json!({"title": "from carol"})),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -182,11 +182,11 @@ fn schema_fixture() -> Value {
             "tenant": {"type": "string", "required": true},
             "email": {"type": "string", "required": true, "pattern": ".+@.+\\..+"},
             "cpf": {"type": "string", "nullable": true},
-            "nome": {"type": "string", "required": true},
-            "senha": {"type": "string", "encrypted": true},
-            "idade": {"type": "int", "min": 0, "max": 150},
-            "ativo": {"type": "bool", "default": true},
-            "criado": {"type": "datetime", "auto": "created_at"}
+            "name": {"type": "string", "required": true},
+            "password": {"type": "string", "encrypted": true},
+            "age": {"type": "int", "min": 0, "max": 150},
+            "active": {"type": "bool", "default": true},
+            "created": {"type": "datetime", "auto": "created_at"}
         }
     })
 }
@@ -215,14 +215,14 @@ async fn records_validation_encryption_and_schema() {
             Some(&root),
             Some(json!({
                 "tenant": "t1", "email": "ana@x.com", "cpf": "111",
-                "nome": "Ana", "senha": "segredo", "idade": 30
+                "name": "Ana", "password": "secret", "age": 30
             })),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(record["ativo"], json!(true));
-    assert!(record["criado"].is_string());
-    assert_eq!(record["senha"], "segredo");
+    assert_eq!(record["active"], json!(true));
+    assert!(record["created"].is_string());
+    assert_eq!(record["password"], "secret");
     let record_id = record["_id"].as_str().unwrap().to_string();
 
     let (status, body) = server
@@ -230,7 +230,7 @@ async fn records_validation_encryption_and_schema() {
             "POST",
             "/dbs/app/tables/users/records",
             Some(&root),
-            Some(json!({"email": "sem-arroba", "idade": 200, "extra": true})),
+            Some(json!({"email": "no-at-sign", "age": 200, "extra": true})),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -242,7 +242,7 @@ async fn records_validation_encryption_and_schema() {
         .collect::<Vec<_>>();
     assert!(fields.contains(&"tenant"));
     assert!(fields.contains(&"email"));
-    assert!(fields.contains(&"idade"));
+    assert!(fields.contains(&"age"));
     assert!(fields.contains(&"extra"));
 
     let (status, _) = server
@@ -250,7 +250,7 @@ async fn records_validation_encryption_and_schema() {
             "POST",
             "/dbs/app/tables/users/records",
             Some(&root),
-            Some(json!({"tenant": "t1", "email": "ana@x.com", "cpf": "999", "nome": "B"})),
+            Some(json!({"tenant": "t1", "email": "ana@x.com", "cpf": "999", "name": "B"})),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -260,34 +260,40 @@ async fn records_validation_encryption_and_schema() {
             "POST",
             "/dbs/app/tables/users/records",
             Some(&root),
-            Some(json!({"tenant": "t2", "email": "bia@x.com", "cpf": "111", "nome": "Bia"})),
+            Some(json!({"tenant": "t2", "email": "bia@x.com", "cpf": "111", "name": "Bia"})),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     let on_disk = server.disk("dbs/app/users.msgpack");
-    assert!(on_disk.contains("enc:v1:"), "campo deveria estar cifrado no disco");
-    assert!(!on_disk.contains("segredo"), "plaintext nao deveria aparecer no disco");
+    assert!(
+        on_disk.contains("enc:v1:"),
+        "field should be encrypted on disk"
+    );
+    assert!(
+        !on_disk.contains("secret"),
+        "plaintext should not appear on disk"
+    );
 
     let (status, body) = server
         .request("GET", "/dbs/app/tables/users/records", Some(&root), None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["records"][0]["senha"], "segredo");
+    assert_eq!(body["records"][0]["password"], "secret");
 
     let (status, _) = server
         .request(
             "POST",
             "/dbs/app/tables/users/records/validate",
             Some(&root),
-            Some(json!({"tenant": "t3", "email": "c@x.com", "nome": "C"})),
+            Some(json!({"tenant": "t3", "email": "c@x.com", "name": "C"})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     let (_, body) = server
         .request("GET", "/dbs/app/tables/users/records", Some(&root), None)
         .await;
-    assert_eq!(body["count"], json!(1), "validate nao deve persistir");
+    assert_eq!(body["count"], json!(1), "validate should not persist");
 
     let (status, body) = server
         .request("GET", "/dbs/app/tables/users/schema", Some(&root), None)
@@ -305,13 +311,17 @@ async fn records_validation_encryption_and_schema() {
                 "fields": {
                     "tenant": {"type": "string", "required": true},
                     "email": {"type": "string", "required": true},
-                    "obrigatorio": {"type": "string", "required": true}
+                    "required": {"type": "string", "required": true}
                 }
             })),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(body["records"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(
+        body["records"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
     let (status, _) = server
         .request("GET", "/dbs/app/tables/users/schema", Some(&root), None)
         .await;
@@ -327,7 +337,7 @@ async fn records_validation_encryption_and_schema() {
                 "fields": {
                     "tenant": {"type": "string", "required": true},
                     "email": {"type": "string", "required": true},
-                    "obrigatorio": {"type": "string", "required": true}
+                    "required": {"type": "string", "required": true}
                 }
             })),
         )
@@ -343,7 +353,7 @@ async fn records_validation_encryption_and_schema() {
                 "fields": {
                     "tenant": {"type": "string"},
                     "email": {"type": "string"},
-                    "senha": {"type": "string", "encrypted": true}
+                    "password": {"type": "string", "encrypted": true}
                 }
             })),
         )
@@ -357,8 +367,8 @@ async fn records_validation_encryption_and_schema() {
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let on_disk = server.disk("dbs/app/users.msgpack");
-    assert!(!on_disk.contains("enc:v1:"), "delete schema deve decifrar");
-    assert!(on_disk.contains("segredo"));
+    assert!(!on_disk.contains("enc:v1:"), "delete schema should decrypt");
+    assert!(on_disk.contains("secret"));
 
     let (status, _) = server
         .request(
@@ -370,7 +380,12 @@ async fn records_validation_encryption_and_schema() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = server
-        .request("GET", "/dbs/app/tables/users/records/inexistente", Some(&root), None)
+        .request(
+            "GET",
+            "/dbs/app/tables/users/records/missing",
+            Some(&root),
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = server.request("GET", "/dbs/nope", Some(&root), None).await;
@@ -402,9 +417,9 @@ async fn query_filters_sorting_pagination() {
         .await;
 
     for record in [
-        json!({"tenant": "t1", "nome": "Ana", "idade": 30, "tags": ["dev"], "endereco": {"cidade": "SP"}}),
-        json!({"tenant": "t2", "nome": "Bia", "idade": 25, "tags": ["vip"], "endereco": {"cidade": "RJ"}}),
-        json!({"tenant": "t3", "nome": "Caio", "idade": 40, "tags": ["vip", "dev"], "endereco": {"cidade": "SP"}}),
+        json!({"tenant": "t1", "name": "Ana", "age": 30, "tags": ["dev"], "address": {"city": "SP"}}),
+        json!({"tenant": "t2", "name": "Bia", "age": 25, "tags": ["vip"], "address": {"city": "RJ"}}),
+        json!({"tenant": "t3", "name": "Caio", "age": 40, "tags": ["vip", "dev"], "address": {"city": "SP"}}),
     ] {
         let (status, _) = server
             .request(
@@ -422,12 +437,12 @@ async fn query_filters_sorting_pagination() {
             "POST",
             "/dbs/q/tables/users/records/query",
             Some(&root),
-            Some(json!({"filter": {"idade": {"$gte": 30}}, "sort": ["-idade"], "fields": ["nome", "idade"]})),
+            Some(json!({"filter": {"age": {"$gte": 30}}, "sort": ["-age"], "fields": ["name", "age"]})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], json!(2));
-    assert_eq!(body["records"][0]["nome"], "Caio");
+    assert_eq!(body["records"][0]["name"], "Caio");
     assert!(body["records"][0].get("tenant").is_none());
 
     let (status, body) = server
@@ -436,36 +451,36 @@ async fn query_filters_sorting_pagination() {
             "/dbs/q/tables/users/records/query",
             Some(&root),
             Some(json!({
-                "filter": {"$or": [{"tags": {"$contains": "vip"}}, {"endereco.cidade": "SP"}]},
-                "sort": [{"field": "idade", "dir": "asc"}],
+                "filter": {"$or": [{"tags": {"$contains": "vip"}}, {"address.city": "SP"}]},
+                "sort": [{"field": "age", "dir": "asc"}],
                 "limit": 2,
-                "fields": ["nome"]
+                "fields": ["name"]
             })),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], json!(3));
     assert_eq!(body["count"], json!(2));
-    assert_eq!(body["records"][0]["nome"], "Bia");
+    assert_eq!(body["records"][0]["name"], "Bia");
 
     let (status, body) = server
         .request(
             "POST",
             "/dbs/q/tables/users/records/query",
             Some(&root),
-            Some(json!({"filter": {"nome": {"$regex": "^[AB]"}}, "sort": ["nome"], "offset": 1, "fields": ["nome"]})),
+            Some(json!({"filter": {"name": {"$regex": "^[AB]"}}, "sort": ["name"], "offset": 1, "fields": ["name"]})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], json!(2));
-    assert_eq!(body["records"][0]["nome"], "Bia");
+    assert_eq!(body["records"][0]["name"], "Bia");
 
     let (status, _) = server
         .request(
             "POST",
             "/dbs/q/tables/users/records/query",
             Some(&root),
-            Some(json!({"filter": {"idade": {"$foo": 1}}})),
+            Some(json!({"filter": {"age": {"$foo": 1}}})),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -475,7 +490,7 @@ async fn query_filters_sorting_pagination() {
             "POST",
             "/dbs/q/tables/users/records/query",
             Some(&root),
-            Some(json!({"desconhecido": true})),
+            Some(json!({"unknown": true})),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -494,18 +509,18 @@ async fn encrypted_field_is_queryable() {
             "/dbs/v/tables",
             Some(&root),
             Some(json!({
-                "name": "cofre",
-                "schema": {"fields": {"segredo": {"type": "string", "encrypted": true}}}
+                "name": "vault",
+                "schema": {"fields": {"secret": {"type": "string", "encrypted": true}}}
             })),
         )
         .await;
-    for (segredo, nome) in [("alpha", "um"), ("beta", "dois")] {
+    for (secret, name) in [("alpha", "one"), ("beta", "two")] {
         let (status, _) = server
             .request(
                 "POST",
-                "/dbs/v/tables/cofre/records",
+                "/dbs/v/tables/vault/records",
                 Some(&root),
-                Some(json!({"segredo": segredo, "nome": nome})),
+                Some(json!({"secret": secret, "name": name})),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -513,14 +528,14 @@ async fn encrypted_field_is_queryable() {
     let (status, body) = server
         .request(
             "POST",
-            "/dbs/v/tables/cofre/records/query",
+            "/dbs/v/tables/vault/records/query",
             Some(&root),
-            Some(json!({"filter": {"segredo": "beta"}, "fields": ["nome"]})),
+            Some(json!({"filter": {"secret": "beta"}, "fields": ["name"]})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], json!(1));
-    assert_eq!(body["records"][0]["nome"], "dois");
+    assert_eq!(body["records"][0]["name"], "two");
 }
 
 #[tokio::test]
@@ -563,9 +578,14 @@ async fn api_keys_lifecycle() {
 
     let bob_login = server.login("bob", "bob12345").await;
     let (status, _) = server.request("GET", "/me", Some(&ci_key), None).await;
-    assert_eq!(status, StatusCode::OK, "login nao deve revogar outras chaves");
+    assert_eq!(status, StatusCode::OK, "login should not revoke other keys");
     let (status, keys) = server
-        .request("GET", &format!("/users/{bob_id}/api-keys"), Some(&root), None)
+        .request(
+            "GET",
+            &format!("/users/{bob_id}/api-keys"),
+            Some(&root),
+            None,
+        )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(keys.as_array().unwrap().len(), 2);
@@ -589,21 +609,23 @@ async fn api_keys_lifecycle() {
             None,
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "bob nao pode ver chaves da carol");
+    assert_eq!(status, StatusCode::FORBIDDEN, "bob cannot see carol's keys");
 
     let (status, self_created) = server
         .request(
             "POST",
             "/auth/api-keys",
             Some(&ci_key),
-            Some(json!({"name": "pessoal"})),
+            Some(json!({"name": "personal"})),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let self_key = self_created["key"].as_str().unwrap().to_string();
     let (status, _) = server.request("GET", "/me", Some(&self_key), None).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, keys) = server.request("GET", "/auth/api-keys", Some(&ci_key), None).await;
+    let (status, keys) = server
+        .request("GET", "/auth/api-keys", Some(&ci_key), None)
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(keys.as_array().unwrap().len() >= 3);
 
@@ -633,7 +655,11 @@ async fn api_keys_lifecycle() {
             None,
         )
         .await;
-    assert_eq!(status, StatusCode::CONFLICT, "revogar de novo deve conflitar");
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "revoking again should conflict"
+    );
 }
 
 #[tokio::test]
@@ -649,22 +675,27 @@ async fn msgpack_legacy_and_migrate() {
             "POST",
             "/dbs/m/tables",
             Some(&root),
-            Some(json!({"name": "novo"})),
+            Some(json!({"name": "new"})),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert!(server.dir.path().join("dbs/m/novo.msgpack").exists());
-    let raw = server.disk_bytes("dbs/m/novo.msgpack");
-    assert!(!raw.is_empty() && raw[0] != b'{', "msgpack nao deve ser JSON");
+    assert!(server.dir.path().join("dbs/m/new.msgpack").exists());
+    let raw = server.disk_bytes("dbs/m/new.msgpack");
+    assert!(
+        !raw.is_empty() && raw[0] != b'{',
+        "msgpack should not be JSON"
+    );
 
-    let legacy = json!({"name": "legado", "records": {"abc": {"campo": "valor"}}});
+    let legacy = json!({"name": "legacy", "records": {"abc": {"field": "value"}}});
     std::fs::write(
-        server.dir.path().join("dbs/m/legado.json"),
+        server.dir.path().join("dbs/m/legacy.json"),
         serde_json::to_vec(&legacy).unwrap(),
     )
     .unwrap();
 
-    let (status, tables) = server.request("GET", "/dbs/m/tables", Some(&root), None).await;
+    let (status, tables) = server
+        .request("GET", "/dbs/m/tables", Some(&root), None)
+        .await;
     assert_eq!(status, StatusCode::OK);
     let names = tables["tables"]
         .as_array()
@@ -672,37 +703,286 @@ async fn msgpack_legacy_and_migrate() {
         .iter()
         .map(|value| value.as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(names.contains(&"legado") && names.contains(&"novo"));
-    assert_eq!(names.len(), 2, "sem duplicatas por extensao");
+    assert!(names.contains(&"legacy") && names.contains(&"new"));
+    assert_eq!(names.len(), 2, "no duplicates by extension");
 
     let (status, body) = server
-        .request("GET", "/dbs/m/tables/legado/records", Some(&root), None)
+        .request("GET", "/dbs/m/tables/legacy/records", Some(&root), None)
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["records"][0]["campo"], "valor");
+    assert_eq!(body["records"][0]["field"], "value");
 
     let (status, _) = server
         .request(
             "POST",
-            "/dbs/m/tables/legado/records",
+            "/dbs/m/tables/legacy/records",
             Some(&root),
             Some(json!({"extra": true})),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert!(server.dir.path().join("dbs/m/legado.msgpack").exists());
-    assert!(!server.dir.path().join("dbs/m/legado.json").exists());
+    assert!(server.dir.path().join("dbs/m/legacy.msgpack").exists());
+    assert!(!server.dir.path().join("dbs/m/legacy.json").exists());
 
     let report = lunadb::engine::migrate_tables(&server.paths, lunadb::storage::Format::Json)
         .await
         .unwrap();
     assert_eq!(report.converted.len(), 2);
-    assert!(server.dir.path().join("dbs/m/novo.json").exists());
-    assert!(!server.dir.path().join("dbs/m/novo.msgpack").exists());
+    assert!(server.dir.path().join("dbs/m/new.json").exists());
+    assert!(!server.dir.path().join("dbs/m/new.msgpack").exists());
     let (status, _) = server
-        .request("GET", "/dbs/m/tables/novo/records", Some(&root), None)
+        .request("GET", "/dbs/m/tables/new/records", Some(&root), None)
         .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn record_patch_list_total_and_aggregate() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "agg"})))
+        .await;
+    let (_, _) = server
+        .request(
+            "POST",
+            "/dbs/agg/tables",
+            Some(&root),
+            Some(json!({"name": "people"})),
+        )
+        .await;
+
+    for record in [
+        json!({"name": "Ana", "city": "SP", "age": 30, "address": {"city": "SP", "zip": "1"}, "tags": ["a"]}),
+        json!({"name": "Caio", "city": "SP", "age": 40}),
+        json!({"name": "Bia", "city": "RJ", "age": 25}),
+    ] {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/dbs/agg/tables/people/records",
+                Some(&root),
+                Some(record),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // list returns total and count
+    let (status, body) = server
+        .request("GET", "/dbs/agg/tables/people/records", Some(&root), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], json!(3));
+    assert_eq!(body["count"], json!(3));
+
+    // patch does shallow/nested merge and null removes the key
+    let first_id = body["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["name"] == "Ana")
+        .unwrap()["_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, patched) = server
+        .request(
+            "PATCH",
+            &format!("/dbs/agg/tables/people/records/{first_id}"),
+            Some(&root),
+            Some(json!({"age": 31, "name": null, "address": {"city": "RJ"}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(patched.get("name").is_none(), "null removes the key");
+    assert_eq!(patched["age"], json!(31));
+    assert_eq!(patched["address"]["city"], json!("RJ"));
+    assert_eq!(
+        patched["address"]["zip"],
+        json!("1"),
+        "merge preserves siblings"
+    );
+    assert_eq!(patched["tags"], json!(["a"]));
+
+    // aggregate by group
+    let (status, body) = server
+        .request(
+            "POST",
+            "/dbs/agg/tables/people/records/aggregate",
+            Some(&root),
+            Some(json!({
+                "group_by": ["city"],
+                "aggregates": {
+                    "n": {"op": "count"},
+                    "sum": {"op": "sum", "field": "age"},
+                    "avg": {"op": "avg", "field": "age"},
+                    "min": {"op": "min", "field": "age"},
+                    "max": {"op": "max", "field": "age"}
+                }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(2));
+    assert_eq!(body["total"], json!(3));
+    let sp = body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["key"]["city"] == "SP")
+        .unwrap();
+    assert_eq!(sp["n"], json!(2));
+    assert_eq!(sp["sum"], json!(71));
+    assert_eq!(sp["avg"], json!(35.5));
+    assert_eq!(sp["min"], json!(31));
+    assert_eq!(sp["max"], json!(40));
+
+    // aggregation without required field is invalid
+    let (status, _) = server
+        .request(
+            "POST",
+            "/dbs/agg/tables/people/records/aggregate",
+            Some(&root),
+            Some(json!({"aggregates": {"x": {"op": "sum"}}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn login_is_rate_limited() {
+    let server = TestServer::spawn().await;
+    for _ in 0..5 {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/auth/login",
+                None,
+                Some(json!({"username": "root", "password": "wrong"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = server
+        .request(
+            "POST",
+            "/auth/login",
+            None,
+            Some(json!({"username": "root", "password": server.password})),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "should block after failures"
+    );
+}
+
+#[tokio::test]
+async fn password_change_flow() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, bob) = server
+        .request(
+            "POST",
+            "/users",
+            Some(&root),
+            Some(json!({"username": "bob", "password": "bob12345"})),
+        )
+        .await;
+    let bob_id = bob["id"].as_str().unwrap().to_string();
+    let bob_key = server.login("bob", "bob12345").await;
+
+    // short password rejected
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{bob_id}/password"),
+            Some(&bob_key),
+            Some(json!({"password": "123", "current_password": "bob12345"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // self requires current_password
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{bob_id}/password"),
+            Some(&bob_key),
+            Some(json!({"password": "new12345"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // wrong current_password
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{bob_id}/password"),
+            Some(&bob_key),
+            Some(json!({"password": "new12345", "current_password": "wrong"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // valid change revokes bob's keys
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{bob_id}/password"),
+            Some(&bob_key),
+            Some(json!({"password": "new12345", "current_password": "bob12345"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server.request("GET", "/me", Some(&bob_key), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "old keys revoked");
+    let _ = server.login("bob", "new12345").await;
+
+    // admin changes another user's password without current_password
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{bob_id}/password"),
+            Some(&root),
+            Some(json!({"password": "admin12345"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let _ = server.login("bob", "admin12345").await;
+
+    // root changes its own password and config is synced/hashed
+    let root_key = server.login_root().await;
+    let me = server.request("GET", "/me", Some(&root_key), None).await.1;
+    let root_id = me["id"].as_str().unwrap().to_string();
+    let (status, _) = server
+        .request(
+            "PUT",
+            &format!("/users/{root_id}/password"),
+            Some(&root_key),
+            Some(json!({"password": "rootnew123"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let saved = server.disk("config.toml");
+    assert!(saved.contains("$argon2"));
+    assert!(!saved.contains("rootnew123"));
+    let _ = server.login("root", "rootnew123").await;
+}
+
+#[tokio::test]
+async fn metrics_endpoint_exposes_counters() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (status, _) = server.request("GET", "/dbs", Some(&root), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = server.request("GET", "/metrics", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let text = body.as_str().unwrap();
+    assert!(text.contains("lunadb_requests_total"));
+    assert!(text.contains("lunadb_responses_total{status_class=\"2xx\"}"));
 }
 
 #[tokio::test]
@@ -711,11 +991,11 @@ async fn root_password_is_hashed_in_config() {
     let saved = server.disk("config.toml");
     assert!(
         saved.contains("$argon2"),
-        "config deveria guardar o hash argon2: {saved}"
+        "config should store the argon2 hash: {saved}"
     );
     assert!(
         !saved.contains("test-secret"),
-        "texto claro nao deveria sobrar no config"
+        "plaintext should not remain in the config"
     );
     let _ = server.login_root().await;
 }
@@ -752,18 +1032,18 @@ async fn schema_patch_migration() {
             "PATCH",
             "/dbs/p/tables/t/schema",
             Some(&root),
-            Some(json!({"add": {"papel": {"type": "string", "default": "user"}}})),
+            Some(json!({"add": {"role": {"type": "string", "default": "user"}}})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(schema["fields"]["papel"]["default"], json!("user"));
+    assert_eq!(schema["fields"]["role"]["default"], json!("user"));
     let (_, body) = server
         .request("GET", "/dbs/p/tables/t/records", Some(&root), None)
         .await;
     assert_eq!(
-        body["records"][0]["papel"],
+        body["records"][0]["role"],
         json!("user"),
-        "migracao deve aplicar default nos registros existentes"
+        "migration should apply default to existing records"
     );
 
     let (status, _) = server
@@ -771,15 +1051,18 @@ async fn schema_patch_migration() {
             "PATCH",
             "/dbs/p/tables/t/schema",
             Some(&root),
-            Some(json!({"update": {"papel": {"required": true}}})),
+            Some(json!({"update": {"role": {"required": true}}})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
 
     for (body, label) in [
-        (json!({"add": {"papel": {"type": "string"}}}), "add existente"),
-        (json!({"remove": ["nao_existe"]}), "remove inexistente"),
-        (json!({"update": {"nao_existe": {"required": true}}}), "update inexistente"),
+        (json!({"add": {"role": {"type": "string"}}}), "existing add"),
+        (json!({"remove": ["does_not_exist"]}), "nonexistent remove"),
+        (
+            json!({"update": {"does_not_exist": {"required": true}}}),
+            "nonexistent update",
+        ),
     ] {
         let (status, _) = server
             .request("PATCH", "/dbs/p/tables/t/schema", Some(&root), Some(body))
@@ -791,7 +1074,7 @@ async fn schema_patch_migration() {
             "PATCH",
             "/dbs/p/tables/t/schema",
             Some(&root),
-            Some(json!({"desconhecido": true})),
+            Some(json!({"unknown": true})),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -801,7 +1084,7 @@ async fn schema_patch_migration() {
             "POST",
             "/dbs/p/tables/t/records",
             Some(&root),
-            Some(json!({"email": "a@x.com", "n": 2, "papel": "admin"})),
+            Some(json!({"email": "a@x.com", "n": 2, "role": "admin"})),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -824,8 +1107,16 @@ async fn schema_patch_migration() {
             Some(json!({"unique_add": ["email"]})),
         )
         .await;
-    assert_eq!(status, StatusCode::CONFLICT, "emails duplicados devem rejeitar");
-    assert!(body["records"].as_array().is_some_and(|items| !items.is_empty()));
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "duplicate emails should be rejected"
+    );
+    assert!(
+        body["records"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
     let (status, schema) = server
         .request(
             "PATCH",
@@ -845,24 +1136,24 @@ async fn schema_patch_migration() {
             Some(json!({"unique_add": ["email"]})),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "unique duplicada no patch");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "duplicate unique in patch");
     let (status, schema) = server
         .request(
             "PATCH",
             "/dbs/p/tables/t/schema?force=true",
             Some(&root),
-            Some(json!({"unique_remove": ["email"], "remove": ["papel"], "strict": true})),
+            Some(json!({"unique_remove": ["email"], "remove": ["role"], "strict": true})),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(schema["unique"], json!([]));
-    assert!(schema["fields"].get("papel").is_none());
+    assert!(schema["fields"].get("role").is_none());
     assert_eq!(schema["strict"], json!(true));
 
     let (status, _) = server
         .request(
             "PATCH",
-            "/dbs/p/tables/nao_existe/schema",
+            "/dbs/p/tables/does_not_exist/schema",
             Some(&root),
             Some(json!({"add": {"x": {"type": "string"}}})),
         )
@@ -887,9 +1178,8 @@ async fn schema_patch_migration() {
             "PATCH",
             "/dbs/p/tables/t/schema",
             Some(&carol_key),
-            Some(json!({"add": {"outro": {"type": "string"}}})),
+            Some(json!({"add": {"other": {"type": "string"}}})),
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "read nao pode migrar schema");
+    assert_eq!(status, StatusCode::FORBIDDEN, "read cannot migrate schema");
 }
-

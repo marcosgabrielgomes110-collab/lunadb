@@ -7,34 +7,36 @@ use crate::client::Client;
 use crate::config::Paths;
 
 const HELP: &str = "\
-comandos:
-  login <user> [senha]            autentica (senha oculta se omitida)
+commands:
+  login <user> [password]         authenticates (password hidden if omitted)
   whoami | status | key rotate
-  dbs                             lista databases
+  dbs                             lists databases
   db create <db> | db rm <db>
-  tables <db>                     lista tabelas
+  tables <db>                     lists tables
   table create <db> <t> [schema-json] | table rm <db> <t>
   schema get <db> <t> | schema set <db> <t> <json> [--force] | schema rm <db> <t>
   schema patch <db> <t> <json> [--force]     add/remove/update/unique_add/unique_remove/strict
-  schema add-field <db> <t> <nome> <json> [--force]
-  schema rm-field <db> <t> <campo>... [--force]
-  schema update-field <db> <t> <campo> <json> [--force]
-  schema unique add|rm <db> <t> <campo|campo1+campo2> [--force]
-  list <db> <t> [limit] [offset]  lista registros
+  schema add-field <db> <t> <name> <json> [--force]
+  schema rm-field <db> <t> <field>... [--force]
+  schema update-field <db> <t> <field> <json> [--force]
+  schema unique add|rm <db> <t> <field|field1+field2> [--force]
+  list <db> <t> [limit] [offset]  lists records
   get <db> <t> <id>
-  add <db> <t> '<json>'           json entre aspas simples
+  add <db> <t> '<json>'           json in single quotes
   put <db> <t> <id> '<json>'
+  patch <db> <t> <id> '<json>'    partial merge (null removes field)
   rm <db> <t> <id>
-  query <db> <t> '<json>'         filtro/sort/fields/limit/offset
-  users | user add <user> <senha> [role] [db:level ...] | user rm <id>
+  query <db> <t> '<json>'         filter/sort/fields/limit/offset
+  aggregate <db> <t> '<json>'     group_by + aggregates (count/sum/avg/min/max)
+  users | user add <user> <password> [role] [db:level ...] | user rm <id>
   grants <user-id> '<json>'
-  apikey create <user> [--name <nome>] | apikey list [user] | apikey revoke <user> <id|prefixo>
+  apikey create <user> [--name <name>] | apikey list [user] | apikey revoke <user> <id|prefix>
   help | exit";
 
 pub fn run(paths: &Paths, base_url: String, api_key: Option<String>) -> anyhow::Result<()> {
     let mut client = Client::new(base_url.clone(), api_key);
-    println!("LunaDB shell ({base_url}) - 'help' para comandos, 'exit' para sair");
-    let mut editor = DefaultEditor::new().context("inicializar editor")?;
+    println!("LunaDB shell ({base_url}) - 'help' for commands, 'exit' to quit");
+    let mut editor = DefaultEditor::new().context("initialize editor")?;
     let history_path = paths.infra.join("shell_history");
     let _ = editor.load_history(&history_path);
     loop {
@@ -51,7 +53,7 @@ pub fn run(paths: &Paths, base_url: String, api_key: Option<String>) -> anyhow::
                 match execute(&mut client, &line) {
                     Ok(Some(output)) => println!("{output}"),
                     Ok(None) => {}
-                    Err(err) => eprintln!("erro: {err}"),
+                    Err(err) => eprintln!("error: {err}"),
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
@@ -64,7 +66,7 @@ pub fn run(paths: &Paths, base_url: String, api_key: Option<String>) -> anyhow::
 }
 
 fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
-    let tokens = shlex::split(line).ok_or_else(|| anyhow!("aspas nao balanceadas"))?;
+    let tokens = shlex::split(line).ok_or_else(|| anyhow!("unbalanced quotes"))?;
     let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
     let Some((command, args)) = refs.split_first() else {
         return Ok(None);
@@ -74,62 +76,62 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
         ("login", [username, rest @ ..]) => {
             let password = match rest {
                 [password] => (*password).to_string(),
-                [] => rpassword::prompt_password(format!("senha de {username}: "))?,
-                _ => return Err(anyhow!("uso: login <usuario> [senha]")),
+                [] => rpassword::prompt_password(format!("password for {username}: "))?,
+                _ => return Err(anyhow!("usage: login <user> [password]")),
             };
             client.login(username, &password)?;
-            Some(format!("logado como {username}"))
+            Some(format!("logged in as {username}"))
         }
         ("whoami", []) => Some(pretty(client.get("/me")?)),
         ("status", []) => Some(pretty(client.get("/status")?)),
         ("key", ["rotate"]) => {
             let value = client.post("/auth/rotate-key", json!({}))?;
             Some(format!(
-                "nova api key (guarde agora): {}",
+                "new api key (save it now): {}",
                 value["api_key"].as_str().unwrap_or("")
             ))
         }
         ("dbs", []) => Some(pretty(client.get("/dbs")?)),
         ("db", ["create", name]) => {
             client.post("/dbs", json!({ "name": name }))?;
-            Some(format!("db '{name}' criado"))
+            Some(format!("db '{name}' created"))
         }
         ("db", ["rm", name]) => {
             client.delete(&format!("/dbs/{name}"))?;
-            Some(format!("db '{name}' removido"))
+            Some(format!("db '{name}' removed"))
         }
         ("tables", [db]) => Some(pretty(client.get(&format!("/dbs/{db}/tables"))?)),
         ("table", ["create", db, table, rest @ ..]) => {
             let schema = match rest {
                 [schema] => Some(json_arg(schema)?),
                 [] => None,
-                _ => return Err(anyhow!("uso: table create <db> <t> [schema-json]")),
+                _ => return Err(anyhow!("usage: table create <db> <t> [schema-json]")),
             };
             let mut body = json!({ "name": table });
             if let Some(schema) = schema {
                 body["schema"] = schema;
             }
             client.post(&format!("/dbs/{db}/tables"), body)?;
-            Some(format!("tabela '{db}.{table}' criada"))
+            Some(format!("table '{db}.{table}' created"))
         }
         ("table", ["rm", db, table]) => {
             client.delete(&format!("/dbs/{db}/tables/{table}"))?;
-            Some(format!("tabela '{db}.{table}' removida"))
+            Some(format!("table '{db}.{table}' removed"))
         }
-        ("schema", ["get", db, table]) => {
-            Some(pretty(client.get(&format!("/dbs/{db}/tables/{table}/schema"))?))
-        }
+        ("schema", ["get", db, table]) => Some(pretty(
+            client.get(&format!("/dbs/{db}/tables/{table}/schema"))?,
+        )),
         ("schema", ["set", db, table, schema, rest @ ..]) => {
             let force = rest.first().is_some_and(|flag| *flag == "--force");
             client.put(
                 &format!("/dbs/{db}/tables/{table}/schema?force={force}"),
                 json_arg(schema)?,
             )?;
-            Some(format!("schema de '{db}.{table}' atualizado"))
+            Some(format!("schema of '{db}.{table}' updated"))
         }
         ("schema", ["rm", db, table]) => {
             client.delete(&format!("/dbs/{db}/tables/{table}/schema"))?;
-            Some(format!("schema de '{db}.{table}' removido"))
+            Some(format!("schema of '{db}.{table}' removed"))
         }
         ("schema", ["patch", db, table, body, rest @ ..]) => {
             let force = rest.first().is_some_and(|flag| *flag == "--force");
@@ -154,7 +156,9 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
                 .map(|arg| Value::String((*arg).to_string()))
                 .collect::<Vec<_>>();
             if fields.is_empty() {
-                return Err(anyhow!("uso: schema rm-field <db> <t> <campo>... [--force]"));
+                return Err(anyhow!(
+                    "usage: schema rm-field <db> <t> <field>... [--force]"
+                ));
             }
             Some(pretty(client.patch(
                 &format!("/dbs/{db}/tables/{table}/schema?force={force}"),
@@ -171,7 +175,11 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
         }
         ("schema", ["unique", action @ ("add" | "rm"), db, table, key, rest @ ..]) => {
             let force = rest.first().is_some_and(|flag| *flag == "--force");
-            let operation = if *action == "add" { "unique_add" } else { "unique_remove" };
+            let operation = if *action == "add" {
+                "unique_add"
+            } else {
+                "unique_remove"
+            };
             let body = json!({ operation: [unique_key_json(key)] });
             Some(pretty(client.patch(
                 &format!("/dbs/{db}/tables/{table}/schema?force={force}"),
@@ -180,13 +188,13 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
         }
         ("list", [db, table, rest @ ..]) => {
             let params = parse_list_params(rest)?;
-            Some(pretty(client.get(&format!(
-                "/dbs/{db}/tables/{table}/records{params}"
-            ))?))
+            Some(pretty(
+                client.get(&format!("/dbs/{db}/tables/{table}/records{params}"))?,
+            ))
         }
-        ("get", [db, table, id]) => Some(pretty(client.get(&format!(
-            "/dbs/{db}/tables/{table}/records/{id}"
-        ))?)),
+        ("get", [db, table, id]) => Some(pretty(
+            client.get(&format!("/dbs/{db}/tables/{table}/records/{id}"))?,
+        )),
         ("add", [db, table, body]) => Some(pretty(client.post(
             &format!("/dbs/{db}/tables/{table}/records"),
             json_arg(body)?,
@@ -195,10 +203,18 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
             &format!("/dbs/{db}/tables/{table}/records/{id}"),
             json_arg(body)?,
         )?)),
+        ("patch", [db, table, id, body]) => Some(pretty(client.patch(
+            &format!("/dbs/{db}/tables/{table}/records/{id}"),
+            json_arg(body)?,
+        )?)),
         ("rm", [db, table, id]) => {
             client.delete(&format!("/dbs/{db}/tables/{table}/records/{id}"))?;
-            Some(format!("registro '{id}' removido"))
+            Some(format!("record '{id}' removed"))
         }
+        ("aggregate", [db, table, query]) => Some(pretty(client.post(
+            &format!("/dbs/{db}/tables/{table}/records/aggregate"),
+            json_arg(query)?,
+        )?)),
         ("query", [db, table, query]) => Some(pretty(client.post(
             &format!("/dbs/{db}/tables/{table}/records/query"),
             json_arg(query)?,
@@ -219,7 +235,7 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
         }
         ("user", ["rm", id]) => {
             client.delete(&format!("/users/{id}"))?;
-            Some(format!("usuario '{id}' removido"))
+            Some(format!("user '{id}' removed"))
         }
         ("grants", [id, grants]) => Some(pretty(client.put(
             &format!("/users/{id}/grants"),
@@ -231,14 +247,11 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
                 [] => None,
                 [name] => Some((*name).to_string()),
                 [flag, name] if *flag == "--name" => Some((*name).to_string()),
-                _ => return Err(anyhow!("uso: apikey create <usuario> [--name <nome>]")),
+                _ => return Err(anyhow!("usage: apikey create <user> [--name <name>]")),
             };
-            let value = client.post(
-                &format!("/users/{id}/api-keys"),
-                json!({ "name": name }),
-            )?;
+            let value = client.post(&format!("/users/{id}/api-keys"), json!({ "name": name }))?;
             Some(format!(
-                "api key criada (guarde agora): {}",
+                "api key created (save it now): {}",
                 value["key"].as_str().unwrap_or("")
             ))
         }
@@ -246,7 +259,7 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
             let id = match rest {
                 [] => "self".to_string(),
                 [username] => resolve_user(client, username)?,
-                _ => return Err(anyhow!("uso: apikey list [usuario]")),
+                _ => return Err(anyhow!("usage: apikey list [user]")),
             };
             let path = if id == "self" {
                 "/auth/api-keys".to_string()
@@ -257,11 +270,11 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
         }
         ("apikey", ["revoke", username, key]) => {
             let id = resolve_user(client, username)?;
-            Some(pretty(client.delete(&format!(
-                "/users/{id}/api-keys/{key}"
-            ))?))
+            Some(pretty(
+                client.delete(&format!("/users/{id}/api-keys/{key}"))?,
+            ))
         }
-        _ => Some(format!("comando desconhecido: {line} (use 'help')")),
+        _ => Some(format!("unknown command: {line} (use 'help')")),
     };
     Ok(output)
 }
@@ -283,7 +296,7 @@ fn pretty(value: Value) -> String {
 }
 
 fn json_arg(text: &str) -> anyhow::Result<Value> {
-    serde_json::from_str(text).map_err(|err| anyhow!("json invalido: {err}"))
+    serde_json::from_str(text).map_err(|err| anyhow!("invalid json: {err}"))
 }
 
 fn parse_list_params(args: &[&str]) -> anyhow::Result<String> {
@@ -329,5 +342,5 @@ fn resolve_user(client: &mut Client, username: &str) -> anyhow::Result<String> {
                 .and_then(|user| user["id"].as_str())
         })
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("usuario '{username}' nao encontrado"))
+        .ok_or_else(|| anyhow!("user '{username}' not found"))
 }

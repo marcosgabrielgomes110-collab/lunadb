@@ -16,6 +16,10 @@ pub struct Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// Maximum request body size, in bytes.
+    pub max_body_bytes: usize,
+    /// Maximum request processing time, in seconds.
+    pub request_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +70,8 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 7700,
+            max_body_bytes: 10 * 1024 * 1024,
+            request_timeout_secs: 30,
         }
     }
 }
@@ -99,7 +105,7 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let body = toml::to_string_pretty(self)?;
-        std::fs::write(path, format!("# LunaDB - arquivo de configuracao\n{body}"))?;
+        std::fs::write(path, format!("# LunaDB - configuration file\n{body}"))?;
         Ok(())
     }
 }
@@ -168,7 +174,10 @@ impl Paths {
     pub fn table_paths(&self, db: &str, table: &str) -> Vec<PathBuf> {
         let configured = self.table_file(db, table);
         let mut paths = vec![configured.clone()];
-        for format in [crate::storage::Format::Msgpack, crate::storage::Format::Json] {
+        for format in [
+            crate::storage::Format::Msgpack,
+            crate::storage::Format::Json,
+        ] {
             let candidate = self
                 .db_dir(db)
                 .join(format!("{table}.{}", format.extension()));
@@ -180,12 +189,16 @@ impl Paths {
     }
 
     pub fn table_file_existing(&self, db: &str, table: &str) -> Option<PathBuf> {
-        self.table_paths(db, table).into_iter().find(|path| path.exists())
+        self.table_paths(db, table)
+            .into_iter()
+            .find(|path| path.exists())
     }
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
-    if path == "~" && let Ok(home) = std::env::var("HOME") {
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
         return PathBuf::from(home);
     } else if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")

@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::auth::{generate_api_key, new_api_key, revoke_key};
 use crate::error::AppError;
-use crate::models::{ApiKeyPublic, User, UsersFile, ROLE_ADMIN};
+use crate::models::{ApiKeyPublic, ROLE_ADMIN, User, UsersFile};
 use crate::state::AppState;
 use crate::storage;
 
@@ -13,7 +13,7 @@ fn ensure_access(actor: &User, target_id: &str) -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::Forbidden(
-            "so o proprio usuario ou um admin pode gerenciar api keys".to_string(),
+            "only the user themselves or an admin can manage api keys".to_string(),
         ))
     }
 }
@@ -22,17 +22,20 @@ fn normalize_name(name: Option<String>) -> Result<String, AppError> {
     let name = name.unwrap_or_else(|| "default".to_string());
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("nome da api key vazio".to_string()));
+        return Err(AppError::BadRequest("empty api key name".to_string()));
     }
     if name.len() > 64 {
         return Err(AppError::BadRequest(
-            "nome da api key excede 64 caracteres".to_string(),
+            "api key name exceeds 64 characters".to_string(),
         ));
     }
     Ok(name)
 }
 
-fn find_active<'a>(keys: &'a mut [crate::models::ApiKey], key_ref: &str) -> Result<&'a mut crate::models::ApiKey, AppError> {
+fn find_active<'a>(
+    keys: &'a mut [crate::models::ApiKey],
+    key_ref: &str,
+) -> Result<&'a mut crate::models::ApiKey, AppError> {
     if keys.iter().any(|key| key.id == key_ref) {
         return keys
             .iter_mut()
@@ -47,7 +50,7 @@ fn find_active<'a>(keys: &'a mut [crate::models::ApiKey], key_ref: &str) -> Resu
         .ok_or_else(|| AppError::NotFound(format!("api key '{key_ref}'")))?;
     if matches.next().is_some() {
         return Err(AppError::Conflict(format!(
-            "prefixo '{key_ref}' e ambiguo, use o id completo"
+            "prefix '{key_ref}' is ambiguous, use the full id"
         )));
     }
     Ok(first)
@@ -67,10 +70,10 @@ pub async fn create(
         .users
         .iter_mut()
         .find(|user| user.id == target_id)
-        .ok_or_else(|| AppError::NotFound(format!("usuario '{target_id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("user '{target_id}'")))?;
     if target.api_keys.iter().filter(|key| key.is_active()).count() >= MAX_ACTIVE_KEYS {
         return Err(AppError::Conflict(format!(
-            "limite de {MAX_ACTIVE_KEYS} api keys ativas atingido"
+            "limit of {MAX_ACTIVE_KEYS} active api keys reached"
         )));
     }
     let plaintext = generate_api_key();
@@ -101,8 +104,12 @@ pub async fn list(
         .users
         .iter()
         .find(|user| user.id == target_id)
-        .ok_or_else(|| AppError::NotFound(format!("usuario '{target_id}'")))?;
-    let keys = target.api_keys.iter().map(ApiKeyPublic::from).collect::<Vec<_>>();
+        .ok_or_else(|| AppError::NotFound(format!("user '{target_id}'")))?;
+    let keys = target
+        .api_keys
+        .iter()
+        .map(ApiKeyPublic::from)
+        .collect::<Vec<_>>();
     tracing::info!(
         target: "lunadb::ops",
         op = "list_api_keys",
@@ -126,11 +133,11 @@ pub async fn revoke(
         .users
         .iter_mut()
         .find(|user| user.id == target_id)
-        .ok_or_else(|| AppError::NotFound(format!("usuario '{target_id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("user '{target_id}'")))?;
     let key = find_active(&mut target.api_keys, key_ref)?;
     if !key.is_active() {
         return Err(AppError::Conflict(format!(
-            "api key '{}' ja esta revogada",
+            "api key '{}' is already revoked",
             key.id
         )));
     }

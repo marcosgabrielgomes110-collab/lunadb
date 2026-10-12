@@ -1,7 +1,7 @@
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth::{self, AuthUser};
 use crate::error::AppError;
@@ -19,6 +19,11 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<Value>, AppError> {
+    let throttle_key = req.username.to_lowercase();
+    if let Some(seconds) = state.login.retry_after(&throttle_key) {
+        tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, retry_after = seconds, "login blocked due to attempts");
+        return Err(AppError::TooManyRequests(seconds));
+    }
     let _guard = state.lock.write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let Some(user) = users
@@ -26,13 +31,16 @@ pub async fn login(
         .iter_mut()
         .find(|user| user.username == req.username)
     else {
-        tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, "credenciais invalidas");
+        state.login.record_failure(&throttle_key);
+        tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, "invalid credentials");
         return Err(AppError::Unauthorized);
     };
     if !auth::verify_password(&req.password, &user.password_hash) {
-        tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, "credenciais invalidas");
+        state.login.record_failure(&throttle_key);
+        tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, "invalid credentials");
         return Err(AppError::Unauthorized);
     }
+    state.login.record_success(&throttle_key);
     user.api_key_hash = None;
     let api_key = auth::rotate_named_key(user, auth::LOGIN_KEY_NAME, chrono::Utc::now());
     let public = UserPublic::from(&*user);

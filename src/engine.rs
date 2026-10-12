@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -18,10 +18,19 @@ macro_rules! ops {
     };
 }
 
+/// Cap on records returned per page (listing and query), avoiding
+/// unbounded responses that would load the whole table into memory.
+pub const MAX_PAGE_SIZE: usize = 1000;
+
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 pub struct ListParams {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+}
+
+pub struct ListOutcome {
+    pub total: usize,
+    pub records: Vec<Value>,
 }
 
 pub fn validate_name(name: &str) -> Result<(), AppError> {
@@ -33,7 +42,7 @@ pub fn validate_name(name: &str) -> Result<(), AppError> {
     if valid {
         Ok(())
     } else {
-        Err(AppError::BadRequest(format!("nome invalido: '{name}'")))
+        Err(AppError::BadRequest(format!("invalid name: '{name}'")))
     }
 }
 
@@ -99,10 +108,10 @@ pub async fn require_level(
     match effective_level(state, user, db).await? {
         Some(level) if level >= min => Ok(()),
         Some(_) => Err(AppError::Forbidden(format!(
-            "permissao '{}' necessaria no db '{db}'",
+            "permission '{}' required on db '{db}'",
             min.as_str()
         ))),
-        None => Err(AppError::Forbidden(format!("sem acesso ao db '{db}'"))),
+        None => Err(AppError::Forbidden(format!("no access to db '{db}'"))),
     }
 }
 
@@ -146,14 +155,14 @@ pub async fn get_db(state: &AppState, user: &User, name: &str) -> Result<DbMeta,
 pub async fn create_db(state: &AppState, user: &User, name: &str) -> Result<DbMeta, AppError> {
     if user.role != ROLE_ADMIN {
         return Err(AppError::Forbidden(
-            "apenas administradores podem criar dbs".to_string(),
+            "only administrators can create dbs".to_string(),
         ));
     }
     validate_name(name)?;
     let _guard = state.lock.write().await;
     let mut dbs = dbs(state).await?;
     if dbs.dbs.iter().any(|meta| meta.name == name) {
-        return Err(AppError::Conflict(format!("db '{name}' ja existe")));
+        return Err(AppError::Conflict(format!("db '{name}' already exists")));
     }
     let meta = DbMeta {
         name: name.to_string(),
@@ -180,7 +189,7 @@ pub async fn delete_db(state: &AppState, user: &User, name: &str) -> Result<(), 
         let level = effective_level(state, user, name).await?;
         if level != Some(Level::Admin) {
             return Err(AppError::Forbidden(format!(
-                "permissao 'admin' necessaria no db '{name}'"
+                "permission 'admin' required on db '{name}'"
             )));
         }
     }
@@ -194,11 +203,7 @@ pub async fn delete_db(state: &AppState, user: &User, name: &str) -> Result<(), 
     Ok(())
 }
 
-pub async fn list_tables(
-    state: &AppState,
-    user: &User,
-    db: &str,
-) -> Result<Vec<String>, AppError> {
+pub async fn list_tables(state: &AppState, user: &User, db: &str) -> Result<Vec<String>, AppError> {
     validate_name(db)?;
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Read).await?;
@@ -236,7 +241,7 @@ pub async fn create_table(
     let _guard = state.lock.write().await;
     if state.paths.table_file_existing(db, table).is_some() {
         return Err(AppError::Conflict(format!(
-            "tabela '{table}' ja existe no db '{db}'"
+            "table '{table}' already exists in db '{db}'"
         )));
     }
     let has_schema = schema.is_some();
@@ -265,14 +270,14 @@ pub async fn delete_table(
     let path = state
         .paths
         .table_file_existing(db, table)
-        .ok_or_else(|| AppError::NotFound(format!("tabela '{db}.{table}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("table '{db}.{table}'")))?;
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {
             ops!("delete_table"; user = user.username, db = db, table = table);
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(AppError::NotFound(format!("tabela '{db}.{table}'")))
+            Err(AppError::NotFound(format!("table '{db}.{table}'")))
         }
         Err(err) => Err(err.into()),
     }
@@ -282,7 +287,7 @@ async fn read_table(state: &AppState, db: &str, table: &str) -> Result<TableFile
     let path = state
         .paths
         .table_file_existing(db, table)
-        .ok_or_else(|| AppError::NotFound(format!("tabela '{db}.{table}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("table '{db}.{table}'")))?;
     Ok(storage::read_value(&path).await?)
 }
 
@@ -316,6 +321,29 @@ fn strip_id(value: &mut Value) {
     }
 }
 
+/// Merge patch (RFC 7386): objects are merged recursively; `null` removes the
+/// key; any other value replaces the field.
+fn merge_patch(target: &mut Value, patch: &Value) {
+    match patch {
+        Value::Object(patch_map) => {
+            if !target.is_object() {
+                *target = Value::Object(serde_json::Map::new());
+            }
+            let Some(target_map) = target.as_object_mut() else {
+                return;
+            };
+            for (key, value) in patch_map {
+                if value.is_null() {
+                    target_map.remove(key);
+                } else {
+                    merge_patch(target_map.entry(key.clone()).or_insert(Value::Null), value);
+                }
+            }
+        }
+        other => *target = other.clone(),
+    }
+}
+
 fn decode_record(
     keyring: &Keyring,
     db: &str,
@@ -341,7 +369,7 @@ fn decode_record(
                 continue;
             };
             let plaintext = keyring.decrypt_value(db, token).map_err(|err| {
-                AppError::Crypto(format!("falha ao decifrar campo '{name}': {err}"))
+                AppError::Crypto(format!("failed to decrypt field '{name}': {err}"))
             })?;
             *field_value = plaintext;
         }
@@ -371,7 +399,7 @@ fn encode_record(
                 continue;
             }
             *field_value = keyring.encrypt_value(db, field_value).map_err(|err| {
-                AppError::Crypto(format!("falha ao cifrar campo '{name}': {err}"))
+                AppError::Crypto(format!("failed to encrypt field '{name}': {err}"))
             })?;
         }
     }
@@ -407,20 +435,21 @@ pub async fn list_records(
     db: &str,
     table: &str,
     params: ListParams,
-) -> Result<Vec<Value>, AppError> {
+) -> Result<ListOutcome, AppError> {
     validate_name(db)?;
     validate_name(table)?;
     require_level(state, user, db, Level::Read).await?;
     let file = read_table(state, db, table).await?;
+    let total = file.records.len();
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(usize::MAX);
+    let limit = params.limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE);
     let mut records = Vec::new();
     for (id, raw) in file.records.iter().skip(offset).take(limit) {
         let value = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
         records.push(with_id(id, &value));
     }
     ops!("list_records"; user = user.username, db = db, table = table, count = records.len());
-    Ok(records)
+    Ok(ListOutcome { total, records })
 }
 
 pub async fn create_record(
@@ -435,7 +464,7 @@ pub async fn create_record(
     require_level(state, user, db, Level::Write).await?;
     if !body.is_object() {
         return Err(AppError::BadRequest(
-            "registro deve ser um objeto JSON".to_string(),
+            "record must be a JSON object".to_string(),
         ));
     }
     strip_id(&mut body);
@@ -471,7 +500,7 @@ pub async fn get_record(
     let raw = file
         .records
         .get(id)
-        .ok_or_else(|| AppError::NotFound(format!("registro '{id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("record '{id}'")))?;
     let value = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
     ops!("get_record"; user = user.username, db = db, table = table, id = id);
     Ok(with_id(id, &value))
@@ -490,7 +519,7 @@ pub async fn replace_record(
     require_level(state, user, db, Level::Write).await?;
     if !body.is_object() {
         return Err(AppError::BadRequest(
-            "registro deve ser um objeto JSON".to_string(),
+            "record must be a JSON object".to_string(),
         ));
     }
     strip_id(&mut body);
@@ -500,7 +529,7 @@ pub async fn replace_record(
         .records
         .get(id)
         .cloned()
-        .ok_or_else(|| AppError::NotFound(format!("registro '{id}'")))?;
+        .ok_or_else(|| AppError::NotFound(format!("record '{id}'")))?;
     let plaintext = if let Some(schema) = file.schema.clone() {
         let unique = build_unique_index(&schema, &file.records, Some(id));
         schema::prepare_record(&schema, &mut body, Mode::Replace, Some(&previous), &unique)
@@ -513,6 +542,53 @@ pub async fn replace_record(
     file.records.insert(id.to_string(), stored);
     write_table(state, db, table, &file).await?;
     ops!("replace_record"; user = user.username, db = db, table = table, id = id);
+    Ok(with_id(id, &plaintext))
+}
+
+pub async fn patch_record(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    id: &str,
+    mut body: Value,
+) -> Result<Value, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Write).await?;
+    if !body.is_object() {
+        return Err(AppError::BadRequest(
+            "patch must be a JSON object".to_string(),
+        ));
+    }
+    strip_id(&mut body);
+    let _guard = state.lock.write().await;
+    let mut file = read_table(state, db, table).await?;
+    let previous = file
+        .records
+        .get(id)
+        .ok_or_else(|| AppError::NotFound(format!("record '{id}'")))?;
+    let mut candidate = decode_record(&state.keyring, db, file.schema.as_ref(), previous)?;
+    merge_patch(&mut candidate, &body);
+    let snapshot = candidate.clone();
+    let plaintext = if let Some(schema) = file.schema.clone() {
+        let unique = build_unique_index(&schema, &file.records, Some(id));
+        schema::prepare_record(
+            &schema,
+            &mut candidate,
+            Mode::Replace,
+            Some(&snapshot),
+            &unique,
+        )
+        .map_err(validation_error)?;
+        candidate
+    } else {
+        candidate
+    };
+    let stored = encode_record(&state.keyring, db, file.schema.as_ref(), &plaintext)?;
+    file.records.insert(id.to_string(), stored);
+    write_table(state, db, table, &file).await?;
+    ops!("patch_record"; user = user.username, db = db, table = table, id = id);
     Ok(with_id(id, &plaintext))
 }
 
@@ -529,7 +605,7 @@ pub async fn delete_record(
     let _guard = state.lock.write().await;
     let mut file = read_table(state, db, table).await?;
     if file.records.remove(id).is_none() {
-        return Err(AppError::NotFound(format!("registro '{id}'")));
+        return Err(AppError::NotFound(format!("record '{id}'")));
     }
     write_table(state, db, table, &file).await?;
     ops!("delete_record"; user = user.username, db = db, table = table, id = id);
@@ -539,6 +615,11 @@ pub async fn delete_record(
 pub struct QueryOutcome {
     pub total: usize,
     pub records: Vec<Value>,
+}
+
+pub struct AggregateOutcome {
+    pub total: usize,
+    pub groups: Vec<Value>,
 }
 
 pub async fn query_records(
@@ -566,7 +647,7 @@ pub async fn query_records(
     query::sort_entries(&mut entries, &request.sort, |entry| &entry.1);
     let total = entries.len();
     let offset = request.offset.unwrap_or(0);
-    let limit = request.limit.unwrap_or(usize::MAX);
+    let limit = request.limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE);
     let records = entries
         .into_iter()
         .skip(offset)
@@ -583,6 +664,34 @@ pub async fn query_records(
     Ok(QueryOutcome { total, records })
 }
 
+pub async fn aggregate_records(
+    state: &AppState,
+    user: &User,
+    db: &str,
+    table: &str,
+    request: query::AggregateRequest,
+) -> Result<AggregateOutcome, AppError> {
+    validate_name(db)?;
+    validate_name(table)?;
+    require_level(state, user, db, Level::Read).await?;
+    let file = read_table(state, db, table).await?;
+    let mut entries: Vec<Value> = Vec::new();
+    for (id, raw) in &file.records {
+        let decoded = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
+        let value = with_id(id, &decoded);
+        if let Some(filter) = &request.filter
+            && !query::matches(filter, &value)?
+        {
+            continue;
+        }
+        entries.push(value);
+    }
+    let total = entries.len();
+    let groups = query::aggregate(&entries, &request)?;
+    ops!("aggregate_records"; user = user.username, db = db, table = table, total = total, groups = groups.len());
+    Ok(AggregateOutcome { total, groups })
+}
+
 pub async fn get_schema(
     state: &AppState,
     user: &User,
@@ -593,9 +702,9 @@ pub async fn get_schema(
     validate_name(table)?;
     require_level(state, user, db, Level::Read).await?;
     let file = read_table(state, db, table).await?;
-    let schema = file.schema.ok_or_else(|| {
-        AppError::NotFound(format!("schema da tabela '{db}.{table}'"))
-    })?;
+    let schema = file
+        .schema
+        .ok_or_else(|| AppError::NotFound(format!("schema of table '{db}.{table}'")))?;
     ops!("get_schema"; user = user.username, db = db, table = table, fields = schema.fields.len());
     Ok(schema)
 }
@@ -614,7 +723,16 @@ pub async fn set_schema(
     require_level(state, user, db, Level::Write).await?;
     schema::compile(&new_schema)?;
     let _guard = state.lock.write().await;
-    let outcome = migrate_and_store(state, db, table, new_schema, force, "set_schema", &user.username).await?;
+    let outcome = migrate_and_store(
+        state,
+        db,
+        table,
+        new_schema,
+        force,
+        "set_schema",
+        &user.username,
+    )
+    .await?;
     ops!("set_schema"; user = user.username, db = db, table = table, force = force, records = outcome.1);
     Ok(outcome.0)
 }
@@ -635,7 +753,16 @@ pub async fn patch_schema(
     let file = read_table(state, db, table).await?;
     let mut current = file.schema.clone().unwrap_or_default();
     schema::apply_patch(&mut current, &patch)?;
-    let outcome = migrate_and_store(state, db, table, current, force, "patch_schema", &user.username).await?;
+    let outcome = migrate_and_store(
+        state,
+        db,
+        table,
+        current,
+        force,
+        "patch_schema",
+        &user.username,
+    )
+    .await?;
     ops!("patch_schema"; user = user.username, db = db, table = table, force = force, records = outcome.1);
     Ok(outcome.0)
 }
@@ -682,7 +809,7 @@ async fn migrate_and_store(
             db = db,
             table = table,
             rejected = rejected.len(),
-            "schema rejeitado pelos registros existentes"
+            "schema rejected by existing records"
         );
         return Err(AppError::SchemaRejected(rejected));
     }
@@ -705,9 +832,10 @@ pub async fn delete_schema(
     require_level(state, user, db, Level::Write).await?;
     let _guard = state.lock.write().await;
     let mut file = read_table(state, db, table).await?;
-    let old = file.schema.take().ok_or_else(|| {
-        AppError::NotFound(format!("schema da tabela '{db}.{table}'"))
-    })?;
+    let old = file
+        .schema
+        .take()
+        .ok_or_else(|| AppError::NotFound(format!("schema of table '{db}.{table}'")))?;
     let mut records = BTreeMap::new();
     for (id, raw) in &file.records {
         let decoded = decode_record(&state.keyring, db, Some(&old), raw)?;
@@ -731,7 +859,7 @@ pub async fn validate_record(
     require_level(state, user, db, Level::Write).await?;
     if !body.is_object() {
         return Err(AppError::BadRequest(
-            "registro deve ser um objeto JSON".to_string(),
+            "record must be a JSON object".to_string(),
         ));
     }
     strip_id(&mut body);

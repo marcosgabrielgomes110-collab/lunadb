@@ -1,12 +1,12 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
 use crate::engine::{self, ListParams};
 use crate::error::AppError;
-use crate::query::QueryRequest;
+use crate::query::{AggregateRequest, QueryRequest};
 use crate::state::AppState;
 
 pub async fn list(
@@ -15,12 +15,13 @@ pub async fn list(
     Path((db, table)): Path<(String, String)>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>, AppError> {
-    let records = engine::list_records(&state, &user.0, &db, &table, params).await?;
+    let outcome = engine::list_records(&state, &user.0, &db, &table, params).await?;
     Ok(Json(json!({
         "db": db,
         "table": table,
-        "count": records.len(),
-        "records": records,
+        "total": outcome.total,
+        "count": outcome.records.len(),
+        "records": outcome.records,
     })))
 }
 
@@ -61,6 +62,22 @@ pub async fn query(
     })))
 }
 
+pub async fn aggregate(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((db, table)): Path<(String, String)>,
+    Json(request): Json<AggregateRequest>,
+) -> Result<Json<Value>, AppError> {
+    let outcome = engine::aggregate_records(&state, &user.0, &db, &table, request).await?;
+    Ok(Json(json!({
+        "db": db,
+        "table": table,
+        "total": outcome.total,
+        "count": outcome.groups.len(),
+        "groups": outcome.groups,
+    })))
+}
+
 pub async fn get(
     State(state): State<AppState>,
     user: AuthUser,
@@ -79,6 +96,17 @@ pub async fn replace(
 ) -> Result<Json<Value>, AppError> {
     Ok(Json(
         engine::replace_record(&state, &user.0, &db, &table, &id, body).await?,
+    ))
+}
+
+pub async fn patch(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((db, table, id)): Path<(String, String, String)>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(
+        engine::patch_record(&state, &user.0, &db, &table, &id, body).await?,
     ))
 }
 
