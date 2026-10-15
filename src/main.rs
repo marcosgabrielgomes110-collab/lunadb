@@ -420,6 +420,20 @@ mod tests {
         config::Paths::from_config(&config)
     }
 
+    /// A pid that cannot be running, chosen within the range each platform
+    /// accepts. Linux pids are bounded by `pid_max` (4194304 by default) and
+    /// macOS/BSD use a signed `pid_t`, where a value above `i32::MAX` would
+    /// wrap to a negative number and hit the `kill` special cases.
+    fn dead_pid() -> u64 {
+        if cfg!(target_os = "linux") {
+            // beyond the default pid_max, so /proc/<pid> cannot exist
+            u32::MAX as u64
+        } else {
+            // valid positive range, but no process will ever hold these
+            (i32::MAX - 1) as u64
+        }
+    }
+
     #[test]
     fn own_process_is_alive() {
         assert!(process_alive(std::process::id() as u64));
@@ -440,7 +454,7 @@ mod tests {
             .unwrap()
             .block_on(storage::write_json(
                 &paths.status_file(),
-                &serde_json::json!({"pid": u32::MAX, "version": "0"}),
+                &serde_json::json!({"pid": dead_pid(), "version": "0"}),
             ))
             .unwrap();
         assert!(
