@@ -106,7 +106,16 @@ make help        # list targets
 make build       # debug build
 make test        # Rust + Python test suites
 make lint        # rustfmt check + clippy
+make luna-setup  # interactive config.toml generator
 make run         # cargo run -- serve
+```
+
+`make luna-setup` prompts for the main settings and writes a `config.toml`; pressing Enter
+accepts the default shown in brackets, and Enter on the password generates a random one:
+
+```bash
+make luna-setup                                   # writes ~/.lunadb/config.toml
+make luna-setup ARGS="--config /tmp/app/config.toml --force"
 ```
 
 Manual equivalents:

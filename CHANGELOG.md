@@ -15,6 +15,8 @@ All notable changes to this project are documented in this file. The format is b
 - Per-table and per-database read/write locks, so writes to different tables run in parallel
   while reads of a table are consistent and writes to the same table stay serialized.
 - Portability: the `migrate` server-running check works on Linux, macOS, and Windows.
+- `make luna-setup` (and `scripts/luna-setup.sh`): interactive `config.toml` generator with
+  defaults on Enter, a random root password option, and a `600` file mode.
 
 ### Changed
 

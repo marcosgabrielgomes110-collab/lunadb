@@ -24,6 +24,20 @@ lunadb init      # creates ~/.lunadb (config, roles, root, master key) and exits
 lunadb serve     # starts the API (Ctrl+C/SIGTERM shut down gracefully)
 ```
 
+## Interactive setup
+
+```bash
+make luna-setup                                  # writes ~/.lunadb/config.toml
+make luna-setup ARGS="--config /tmp/app/config.toml"
+make luna-setup ARGS="--force"                   # skip the overwrite prompt
+```
+
+Prompts for `host`, `port`, `storage.path`, `storage.format`, body limit, request timeout,
+root `username` and `password`, and the logging settings. Pressing Enter accepts the default
+shown in brackets; Enter on the password generates a random one and prints it once. The file is
+written with mode `600`, and refuses to overwrite an existing config unless you confirm or pass
+`--force`. The password stays in plaintext until the first boot hashes it with argon2id.
+
 ## API key commands (non-interactive)
 
 ```bash

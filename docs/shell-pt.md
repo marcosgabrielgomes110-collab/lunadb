@@ -24,6 +24,20 @@ lunadb init      # cria ~/.lunadb (config, roles, root, master key) e sai
 lunadb serve     # sobe a API (Ctrl+C/SIGTERM encerram de forma graciosa)
 ```
 
+## Setup interativo
+
+```bash
+make luna-setup                                  # grava ~/.lunadb/config.toml
+make luna-setup ARGS="--config /tmp/app/config.toml"
+make luna-setup ARGS="--force"                   # pula a confirmação de sobrescrita
+```
+
+Pergunta `host`, `port`, `storage.path`, `storage.format`, limite de corpo, timeout da requisição,
+`username` e `password` do root e as opções de log. Enter aceita o default mostrado entre
+colchetes; Enter na senha gera uma aleatória e a imprime uma única vez. O arquivo é gravado com
+modo `600` e não sobrescreve uma config existente sem confirmação (ou `--force`). A senha fica em
+texto puro até o primeiro boot convertê-la para argon2id.
+
 ## Comandos de API key (não-interativos)
 
 ```bash

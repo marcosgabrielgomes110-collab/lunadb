@@ -24,7 +24,8 @@ BINDIR  ?= $(PREFIX)/bin
 DESTDIR ?=
 
 .PHONY: help build release check fmt fmt-check clippy lint test test-rust test-py \
-        venv run serve init shell migrate apikey install uninstall clean distclean
+        venv run serve init shell migrate apikey install uninstall clean distclean \
+        luna-setup
 
 help:
 	@echo "LunaDB - available targets:"
@@ -46,6 +47,7 @@ help:
 	@echo "  shell       Opens the interactive shell"
 	@echo "  migrate     Converts tables (TO=json|msgpack, FORCE=1)"
 	@echo "  apikey      API key commands (ARGS=\"list\" etc.)"
+	@echo "  luna-setup  Interactive config.toml generator (Enter = default)"
 	@echo "  install     Installs ONLY the binary to PREFIX/bin (default /usr/local)"
 	@echo "  uninstall   Removes the installed binary"
 	@echo "  clean       Removes Cargo artifacts"
@@ -111,6 +113,11 @@ migrate:
 
 apikey:
 	$(CARGO) run -- apikey $(ARGS)
+
+# Interactive config.toml generator. ARGS is forwarded to the script, e.g.
+#   make luna-setup ARGS="--config /tmp/luna/config.toml --force"
+luna-setup:
+	sh scripts/luna-setup.sh $(ARGS)
 
 # Installs only the compiled binary (release) to $(DESTDIR)$(BINDIR).
 install: release
