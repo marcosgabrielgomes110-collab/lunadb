@@ -825,6 +825,7 @@ dependencies = [
  "clap",
  "hex",
  "hkdf",
+ "libc",
  "rand",
  "regex",
  "rmp-serde",
@@ -845,6 +846,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

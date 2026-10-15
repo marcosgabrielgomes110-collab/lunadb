@@ -103,6 +103,8 @@ records that violate the new schema return `error: HTTP 409 ...` with the ids.
 | Command | Example |
 |---|---|
 | `list <db> <t> [limit] [offset]` | `list app users 10 0` |
+| `list-next <db> <t> <cursor> [limit]` | `list-next app users eyJrIjpbLi4uXX0 10` |
+| `walk <db> <t> [page-size]` | `walk app users 200` (streams every record) |
 | `get <db> <t> <id>` | `get app users 0f045bbf-...` |
 | `add <db> <t> '<json>'` | `add app users '{"email":"a@x.com"}'` |
 | `put <db> <t> <id> '<json>'` | `put app users <id> '{"email":"b@x.com"}'` |

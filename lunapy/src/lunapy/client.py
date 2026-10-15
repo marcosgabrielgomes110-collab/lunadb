@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence, Union
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Union
 
 from .errors import LunaConnectionError, LunaError, error_from_status
 from .models import (
@@ -17,6 +17,7 @@ from .models import (
     Grant,
     Level,
     QueryResult,
+    RecordPage,
     Role,
     Sort,
     TableSchema,
@@ -358,13 +359,24 @@ class LunaClient:
         table: str,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> list[dict[str, Any]]:
+        return list(self.list_records_page(db, table, limit, offset, cursor).records)
+
+    def list_records_page(
+        self,
+        db: str,
+        table: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        cursor: Optional[str] = None,
+    ) -> RecordPage:
         data = self._request(
             "GET",
             f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records",
-            params={"limit": limit, "offset": offset},
+            params={"limit": limit, "offset": offset, "cursor": cursor},
         )
-        return list(data["records"])
+        return RecordPage.from_dict(data)
 
     def create_record(
         self, db: str, table: str, record: Mapping[str, Any]
@@ -464,6 +476,7 @@ class LunaClient:
         fields: Optional[Iterable[str]] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> QueryResult:
         body: dict[str, Any] = {}
         if filter is not None:
@@ -476,12 +489,84 @@ class LunaClient:
             body["limit"] = limit
         if offset is not None:
             body["offset"] = offset
+        if cursor is not None:
+            body["cursor"] = cursor
         data = self._request(
             "POST",
             f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records/query",
             body=body,
         )
         return QueryResult.from_dict(data)
+
+    def iter_records(
+        self,
+        db: str,
+        table: str,
+        page_size: int = 100,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Walks every record of `table` with keyset pagination.
+
+        Stable under concurrent inserts and deletes, unlike offset paging.
+        Pass `limit` to stop after that many records, or `offset` to skip a
+        prefix (the first page is still requested with `offset`).
+        """
+        cursor: Optional[str] = None
+        yielded = 0
+        while True:
+            page_offset = offset if cursor is None else None
+            page = self.list_records_page(
+                db, table, limit=page_size, offset=page_offset, cursor=cursor
+            )
+            if not page.records:
+                return
+            for record in page.records:
+                if limit is not None and yielded >= limit:
+                    return
+                yielded += 1
+                yield record
+            if not page.next_cursor:
+                return
+            # after the first page the cursor already encodes the position, so
+            # the offset must not be sent again
+            offset = None
+            cursor = page.next_cursor
+
+    def iter_query(
+        self,
+        db: str,
+        table: str,
+        *,
+        page_size: int = 100,
+        limit: Optional[int] = None,
+        filter: Optional[Mapping[str, Any]] = None,
+        sort: Optional[Iterable[Union[Sort, Mapping[str, str], tuple[str, str], str]]] = None,
+        fields: Optional[Iterable[str]] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Walks every record matching a query, one keyset page at a time."""
+        cursor: Optional[str] = None
+        yielded = 0
+        while True:
+            result = self.query(
+                db,
+                table,
+                filter=filter,
+                sort=sort,
+                fields=fields,
+                limit=page_size,
+                cursor=cursor,
+            )
+            if not result.records:
+                return
+            for record in result.records:
+                if limit is not None and yielded >= limit:
+                    return
+                yielded += 1
+                yield record
+            if not result.next_cursor:
+                return
+            cursor = result.next_cursor
 
     def delete_record(self, db: str, table: str, record_id: str) -> None:
         self._request("DELETE", self._record_path(db, table, record_id))

@@ -24,7 +24,7 @@ pub async fn login(
         tracing::warn!(target: "lunadb::ops", op = %"login", user = %req.username, retry_after = seconds, "login blocked due to attempts");
         return Err(AppError::TooManyRequests(seconds));
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let Some(user) = users
         .users
@@ -53,7 +53,7 @@ pub async fn rotate_key(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Value>, AppError> {
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let target = users
         .users

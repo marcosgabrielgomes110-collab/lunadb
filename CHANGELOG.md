@@ -8,6 +8,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Cursor (keyset) pagination** for listing and querying records: `next_cursor` in responses and a
+  `cursor` parameter/field. Stable under concurrent inserts and deletes, unlike `offset`.
+- Python SDK helpers `list_records_page`, `iter_records`, and `iter_query`; shell commands
+  `list-next` and `walk`.
+- Per-table and per-database read/write locks, so writes to different tables run in parallel
+  while reads of a table are consistent and writes to the same table stay serialized.
+- Portability: the `migrate` server-running check works on Linux, macOS, and Windows.
+
+### Changed
+
+- Reads of a table file now take a shared lock, so a response can no longer observe a partially
+  written table.
+- `create_db`/`delete_db` update the database registry under the metadata lock, closing a race
+  between concurrent create and delete.
+
 - HTTP API for databases, tables, schemas, records, and queries, built with `axum`.
 - Schema DSL with typed fields, constraints, enums, defaults, `strict` mode, `auto`
   timestamps, and single/compound `unique` keys.

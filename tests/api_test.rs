@@ -1,8 +1,10 @@
 mod common;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use common::TestServer;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn health_and_auth_flow() {
@@ -1182,4 +1184,268 @@ async fn schema_patch_migration() {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "read cannot migrate schema");
+}
+
+#[tokio::test]
+async fn cursor_pagination_walks_without_gaps_or_repeats() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "c"})))
+        .await;
+    let (_, _) = server
+        .request(
+            "POST",
+            "/dbs/c/tables",
+            Some(&root),
+            Some(json!({"name": "items"})),
+        )
+        .await;
+
+    let mut expected = Vec::new();
+    for index in 0..7 {
+        let (status, record) = server
+            .request(
+                "POST",
+                "/dbs/c/tables/items/records",
+                Some(&root),
+                Some(json!({"n": index, "name": format!("item-{index}")})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        expected.push(record["_id"].as_str().unwrap().to_string());
+    }
+    expected.sort();
+
+    // list endpoint: page of 3, then follow next_cursor twice
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..4 {
+        let uri = match &cursor {
+            Some(cursor) => format!("/dbs/c/tables/items/records?limit=3&cursor={cursor}"),
+            None => "/dbs/c/tables/items/records?limit=3".to_string(),
+        };
+        let (status, body) = server.request("GET", &uri, Some(&root), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], json!(7));
+        for record in body["records"].as_array().unwrap() {
+            seen.push(record["_id"].as_str().unwrap().to_string());
+        }
+        match body["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen, expected,
+        "cursor walk must visit every record exactly once"
+    );
+
+    // a short final page has no next_cursor
+    let (status, body) = server
+        .request(
+            "GET",
+            &format!(
+                "/dbs/c/tables/items/records?limit=3&cursor={}",
+                "bogus-cursor"
+            ),
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid cursor must be rejected"
+    );
+    assert!(body["error"].is_string());
+}
+
+#[tokio::test]
+async fn query_cursor_paginates_sorted_results() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "qc"})))
+        .await;
+    let (_, _) = server
+        .request(
+            "POST",
+            "/dbs/qc/tables",
+            Some(&root),
+            Some(json!({"name": "sales"})),
+        )
+        .await;
+
+    for index in 0..5 {
+        let (status, _) = server
+            .request(
+                "POST",
+                "/dbs/qc/tables/sales/records",
+                Some(&root),
+                Some(json!({"city": "SP", "value": index})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    let mut values = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut body = json!({
+            "filter": {"city": "SP"},
+            "sort": ["-value"],
+            "limit": 2,
+            "fields": ["value"],
+        });
+        if let Some(cursor) = &cursor {
+            body["cursor"] = json!(cursor);
+        }
+        let (status, page) = server
+            .request(
+                "POST",
+                "/dbs/qc/tables/sales/records/query",
+                Some(&root),
+                Some(body),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["total"], json!(5), "total stays the filtered total");
+        for record in page["records"].as_array().unwrap() {
+            values.push(record["value"].as_i64().unwrap());
+        }
+        match page["next_cursor"].as_str() {
+            Some(next) => cursor = Some(next.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(values, vec![4, 3, 2, 1, 0]);
+
+    // offset still works when no cursor is supplied
+    let (status, page) = server
+        .request(
+            "POST",
+            "/dbs/qc/tables/sales/records/query",
+            Some(&root),
+            Some(json!({"sort": ["-value"], "limit": 2, "offset": 2, "fields": ["value"]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["records"][0]["value"], json!(2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_on_one_table_are_serialized_correctly() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "conc"})))
+        .await;
+    let (_, _) = server
+        .request(
+            "POST",
+            "/dbs/conc/tables",
+            Some(&root),
+            Some(json!({"name": "counters"})),
+        )
+        .await;
+
+    // 40 concurrent inserts into the same table must all survive: the per-table
+    // write lock serializes the read-modify-write of the table file.
+    let mut tasks = Vec::new();
+    for index in 0..40 {
+        let router = server.router.clone();
+        let key = root.clone();
+        tasks.push(tokio::spawn(async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/dbs/conc/tables/counters/records")
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"n": index})).unwrap(),
+                ))
+                .unwrap();
+            router.oneshot(request).await.unwrap().status()
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), StatusCode::CREATED);
+    }
+
+    let (status, body) = server
+        .request(
+            "GET",
+            "/dbs/conc/tables/counters/records?limit=100",
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["total"], json!(40), "no insert may be lost");
+    assert_eq!(body["count"], json!(40));
+
+    let mut seen = body["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["n"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    seen.sort();
+    assert_eq!(seen, (0..40).collect::<Vec<_>>());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reads_and_writes_on_distinct_tables_do_not_block_each_other() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "iso"})))
+        .await;
+    for table in ["a", "b"] {
+        let (_, _) = server
+            .request(
+                "POST",
+                "/dbs/iso/tables",
+                Some(&root),
+                Some(json!({"name": table})),
+            )
+            .await;
+    }
+
+    let mut tasks = Vec::new();
+    for index in 0..20 {
+        for table in ["a", "b"] {
+            let router = server.router.clone();
+            let key = root.clone();
+            tasks.push(tokio::spawn(async move {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/dbs/iso/tables/{table}/records"))
+                    .header("authorization", format!("Bearer {key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"n": index})).unwrap(),
+                    ))
+                    .unwrap();
+                router.oneshot(request).await.unwrap().status()
+            }));
+        }
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), StatusCode::CREATED);
+    }
+
+    for table in ["a", "b"] {
+        let (status, body) = server
+            .request(
+                "GET",
+                &format!("/dbs/iso/tables/{table}/records?limit=100"),
+                Some(&root),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], json!(20));
+    }
 }

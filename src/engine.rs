@@ -22,15 +22,18 @@ macro_rules! ops {
 /// unbounded responses that would load the whole table into memory.
 pub const MAX_PAGE_SIZE: usize = 1000;
 
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ListParams {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Opaque keyset cursor returned as `next_cursor` by a previous page.
+    pub cursor: Option<String>,
 }
 
 pub struct ListOutcome {
     pub total: usize,
     pub records: Vec<Value>,
+    pub next_cursor: Option<String>,
 }
 
 pub fn validate_name(name: &str) -> Result<(), AppError> {
@@ -60,6 +63,13 @@ pub async fn roles(state: &AppState) -> Result<RolesFile, AppError> {
 
 async fn dbs(state: &AppState) -> Result<DbsFile, AppError> {
     Ok(storage::read_json(&state.paths.dbs_registry()).await?)
+}
+
+/// Reads the database registry under the metadata read lock, so the snapshot
+/// never races with a create/delete of a database.
+async fn dbs_consistent(state: &AppState) -> Result<DbsFile, AppError> {
+    let _guard = state.lock_meta_read().await;
+    dbs(state).await
 }
 
 fn granted_level(grants: &[Grant], db: &str) -> Option<Level> {
@@ -125,7 +135,7 @@ async fn ensure_db_exists(state: &AppState, db: &str) -> Result<(), AppError> {
 }
 
 pub async fn list_dbs(state: &AppState, user: &User) -> Result<Vec<DbMeta>, AppError> {
-    let dbs = dbs(state).await?;
+    let dbs = dbs_consistent(state).await?;
     let metas = if user.role == ROLE_ADMIN {
         dbs.dbs
     } else {
@@ -141,7 +151,7 @@ pub async fn list_dbs(state: &AppState, user: &User) -> Result<Vec<DbMeta>, AppE
 
 pub async fn get_db(state: &AppState, user: &User, name: &str) -> Result<DbMeta, AppError> {
     validate_name(name)?;
-    let dbs = dbs(state).await?;
+    let dbs = dbs_consistent(state).await?;
     let meta = dbs
         .dbs
         .into_iter()
@@ -159,7 +169,7 @@ pub async fn create_db(state: &AppState, user: &User, name: &str) -> Result<DbMe
         ));
     }
     validate_name(name)?;
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut dbs = dbs(state).await?;
     if dbs.dbs.iter().any(|meta| meta.name == name) {
         return Err(AppError::Conflict(format!("db '{name}' already exists")));
@@ -178,21 +188,17 @@ pub async fn create_db(state: &AppState, user: &User, name: &str) -> Result<DbMe
 
 pub async fn delete_db(state: &AppState, user: &User, name: &str) -> Result<(), AppError> {
     validate_name(name)?;
-    let _guard = state.lock.write().await;
+    require_level(state, user, name, Level::Admin).await?;
+    // The database lock excludes in-flight table operations; the metadata lock
+    // serializes the registry update against create_db. Always in this order.
+    let _db_guard = state.lock_db_write(name).await;
+    let _meta_guard = state.lock_meta_write().await;
     let mut dbs = dbs(state).await?;
     let index = dbs
         .dbs
         .iter()
         .position(|meta| meta.name == name)
         .ok_or_else(|| AppError::NotFound(format!("db '{name}'")))?;
-    if user.role != ROLE_ADMIN {
-        let level = effective_level(state, user, name).await?;
-        if level != Some(Level::Admin) {
-            return Err(AppError::Forbidden(format!(
-                "permission 'admin' required on db '{name}'"
-            )));
-        }
-    }
     let dir = state.paths.db_dir(name);
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir).await?;
@@ -238,7 +244,7 @@ pub async fn create_table(
     if let Some(schema) = &schema {
         schema::compile(schema)?;
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_table_write(db, table).await;
     if state.paths.table_file_existing(db, table).is_some() {
         return Err(AppError::Conflict(format!(
             "table '{table}' already exists in db '{db}'"
@@ -266,7 +272,7 @@ pub async fn delete_table(
     validate_name(table)?;
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Write).await?;
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_table_write(db, table).await;
     let path = state
         .paths
         .table_file_existing(db, table)
@@ -283,12 +289,25 @@ pub async fn delete_table(
     }
 }
 
-async fn read_table(state: &AppState, db: &str, table: &str) -> Result<TableFile, AppError> {
+/// Reads a table without taking any lock. Callers hold either the table read
+/// lock or the table write lock.
+async fn read_table_unlocked(
+    state: &AppState,
+    db: &str,
+    table: &str,
+) -> Result<TableFile, AppError> {
     let path = state
         .paths
         .table_file_existing(db, table)
         .ok_or_else(|| AppError::NotFound(format!("table '{db}.{table}'")))?;
     Ok(storage::read_value(&path).await?)
+}
+
+/// Reads a table under its read lock, so the snapshot never mixes with a
+/// concurrent write to the same file.
+async fn read_table(state: &AppState, db: &str, table: &str) -> Result<TableFile, AppError> {
+    let _guard = state.lock_table_read(db, table).await;
+    read_table_unlocked(state, db, table).await
 }
 
 async fn write_table(
@@ -441,15 +460,47 @@ pub async fn list_records(
     require_level(state, user, db, Level::Read).await?;
     let file = read_table(state, db, table).await?;
     let total = file.records.len();
-    let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE);
+    // Without an explicit sort, records follow `_id` ascending, which keeps the
+    // cursor walk stable because `_id` is unique.
+    let sort = query::effective_sort(&[]);
+    let cursor = match params.cursor.as_deref() {
+        Some(cursor) => Some(query::decode_cursor(cursor, &sort)?),
+        None => None,
+    };
+    let offset = params.offset.unwrap_or(0);
     let mut records = Vec::new();
-    for (id, raw) in file.records.iter().skip(offset).take(limit) {
-        let value = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
-        records.push(with_id(id, &value));
+    let mut last_key: Option<Vec<Value>> = None;
+    for (id, raw) in file.records.iter() {
+        let decoded = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
+        let value = with_id(id, &decoded);
+        if let Some(cursor) = &cursor {
+            let key = query::cursor_key(&value, &sort)?;
+            if !query::key_after(&key, &cursor.k, &sort) {
+                continue;
+            }
+        }
+        if records.len() >= limit {
+            break;
+        }
+        last_key = Some(query::cursor_key(&value, &sort)?);
+        records.push(value);
     }
+    let page_full = records.len() == limit;
+    if cursor.is_none() && offset > 0 {
+        records.drain(..offset.min(records.len()));
+    }
+    let next_cursor = if page_full {
+        last_key.map(|key| query::encode_cursor(&key)).transpose()?
+    } else {
+        None
+    };
     ops!("list_records"; user = user.username, db = db, table = table, count = records.len());
-    Ok(ListOutcome { total, records })
+    Ok(ListOutcome {
+        total,
+        records,
+        next_cursor,
+    })
 }
 
 pub async fn create_record(
@@ -468,8 +519,8 @@ pub async fn create_record(
         ));
     }
     strip_id(&mut body);
-    let _guard = state.lock.write().await;
-    let mut file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let mut file = read_table_unlocked(state, db, table).await?;
     let id = Uuid::new_v4().to_string();
     let plaintext = if let Some(schema) = file.schema.clone() {
         let unique = build_unique_index(&schema, &file.records, None);
@@ -523,8 +574,8 @@ pub async fn replace_record(
         ));
     }
     strip_id(&mut body);
-    let _guard = state.lock.write().await;
-    let mut file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let mut file = read_table_unlocked(state, db, table).await?;
     let previous = file
         .records
         .get(id)
@@ -562,8 +613,8 @@ pub async fn patch_record(
         ));
     }
     strip_id(&mut body);
-    let _guard = state.lock.write().await;
-    let mut file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let mut file = read_table_unlocked(state, db, table).await?;
     let previous = file
         .records
         .get(id)
@@ -602,8 +653,8 @@ pub async fn delete_record(
     validate_name(db)?;
     validate_name(table)?;
     require_level(state, user, db, Level::Write).await?;
-    let _guard = state.lock.write().await;
-    let mut file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let mut file = read_table_unlocked(state, db, table).await?;
     if file.records.remove(id).is_none() {
         return Err(AppError::NotFound(format!("record '{id}'")));
     }
@@ -615,6 +666,7 @@ pub async fn delete_record(
 pub struct QueryOutcome {
     pub total: usize,
     pub records: Vec<Value>,
+    pub next_cursor: Option<String>,
 }
 
 pub struct AggregateOutcome {
@@ -633,7 +685,12 @@ pub async fn query_records(
     validate_name(table)?;
     require_level(state, user, db, Level::Read).await?;
     let file = read_table(state, db, table).await?;
-    let mut entries: Vec<(String, Value)> = Vec::new();
+    let sort = query::effective_sort(&request.sort);
+    let cursor = match request.cursor.as_deref() {
+        Some(cursor) => Some(query::decode_cursor(cursor, &sort)?),
+        None => None,
+    };
+    let mut entries: Vec<(String, Value, Vec<Value>)> = Vec::new();
     for (id, raw) in &file.records {
         let decoded = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
         let value = with_id(id, &decoded);
@@ -642,17 +699,31 @@ pub async fn query_records(
         {
             continue;
         }
-        entries.push((id.clone(), value));
+        let key = query::cursor_key(&value, &sort)?;
+        entries.push((id.clone(), value, key));
     }
-    query::sort_entries(&mut entries, &request.sort, |entry| &entry.1);
     let total = entries.len();
-    let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(MAX_PAGE_SIZE).min(MAX_PAGE_SIZE);
+    query::sort_entries(&mut entries, &sort, |entry| &entry.1);
+    // `total` above is the count of matching records, before the cursor/offset
+    // window, so it stays stable across pages.
+    if let Some(cursor) = &cursor {
+        entries.retain(|(_, _, key)| query::key_after(key, &cursor.k, &sort));
+    } else {
+        let offset = request.offset.unwrap_or(0);
+        if offset > 0 {
+            entries.drain(..offset.min(entries.len()));
+        }
+    }
+    entries.truncate(limit);
+    let page_full = entries.len() == limit;
+    let next_cursor = match (page_full, entries.last()) {
+        (true, Some((_, _, key))) => Some(query::encode_cursor(key)?),
+        _ => None,
+    };
     let records = entries
         .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|(id, value)| {
+        .map(|(id, value, _)| {
             let value = match &request.fields {
                 Some(fields) => query::project(&value, fields),
                 None => value,
@@ -661,7 +732,11 @@ pub async fn query_records(
         })
         .collect::<Vec<_>>();
     ops!("query_records"; user = user.username, db = db, table = table, total = total, returned = records.len());
-    Ok(QueryOutcome { total, records })
+    Ok(QueryOutcome {
+        total,
+        records,
+        next_cursor,
+    })
 }
 
 pub async fn aggregate_records(
@@ -722,7 +797,7 @@ pub async fn set_schema(
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Write).await?;
     schema::compile(&new_schema)?;
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_table_write(db, table).await;
     let outcome = migrate_and_store(
         state,
         db,
@@ -749,8 +824,8 @@ pub async fn patch_schema(
     validate_name(table)?;
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Write).await?;
-    let _guard = state.lock.write().await;
-    let file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let file = read_table_unlocked(state, db, table).await?;
     let mut current = file.schema.clone().unwrap_or_default();
     schema::apply_patch(&mut current, &patch)?;
     let outcome = migrate_and_store(
@@ -776,7 +851,8 @@ async fn migrate_and_store(
     op: &str,
     username: &str,
 ) -> Result<(TableSchema, usize), AppError> {
-    let mut file = read_table(state, db, table).await?;
+    // Both callers hold the table write lock.
+    let mut file = read_table_unlocked(state, db, table).await?;
     let old = file.schema.take();
     let mut migrated = BTreeMap::new();
     let mut unique = UniqueIndex::new();
@@ -830,8 +906,8 @@ pub async fn delete_schema(
     validate_name(table)?;
     ensure_db_exists(state, db).await?;
     require_level(state, user, db, Level::Write).await?;
-    let _guard = state.lock.write().await;
-    let mut file = read_table(state, db, table).await?;
+    let _guard = state.lock_table_write(db, table).await;
+    let mut file = read_table_unlocked(state, db, table).await?;
     let old = file
         .schema
         .take()

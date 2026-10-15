@@ -221,10 +221,10 @@ Aplica operações sobre o schema atual — inclusive quando a tabela **ainda n�
 
 | Método | Rota | Permissão | Retorno |
 |---|---|---|---|
-| GET | `/dbs/{db}/tables/{table}/records?limit=&offset=` | read | `{"db","table","total","count","records":[{"_id":...}]}` |
+| GET | `/dbs/{db}/tables/{table}/records?limit=&offset=&cursor=` | read | `{"db","table","total","count","next_cursor","records":[{"_id":...}]}` |
 | POST | `/dbs/{db}/tables/{table}/records` | write | `201` registro com `_id` |
 | POST | `/dbs/{db}/tables/{table}/records/validate` | write | `200` registro preparado (dry-run, não persiste) |
-| POST | `/dbs/{db}/tables/{table}/records/query` | read | `{"db","table","total","count","records"}` |
+| POST | `/dbs/{db}/tables/{table}/records/query` | read | `{"db","table","total","count","next_cursor","records"}` |
 | POST | `/dbs/{db}/tables/{table}/records/aggregate` | read | `{"db","table","total","count","groups"}` |
 | GET | `/dbs/{db}/tables/{table}/records/{id}` | read | registro |
 | PUT | `/dbs/{db}/tables/{table}/records/{id}` | write | registro (substituição total) |
@@ -234,6 +234,34 @@ Aplica operações sobre o schema atual — inclusive quando a tabela **ainda n�
 O corpo do registro deve ser um objeto JSON; `_id` é gerado pelo servidor e ignorado se enviado.
 `total` é o tamanho da tabela e `count` o retornado na página; `limit` é limitado a 1000
 (default), evitando respostas sem teto.
+
+### Paginação por cursor (`next_cursor` / `cursor`)
+
+Tanto a listagem quanto a query aceitam um `cursor` opaco e devolvem `next_cursor`. O cursor é uma
+posição **keyset** codificada em base64url (os valores de ordenação do último registro, mais `_id`
+como desempate único), não um offset inteiro. Consequências:
+
+- Uma varredura nunca pula nem repete registro, mesmo com inserções ou remoções entre páginas.
+- `total` é a contagem antes da janela do cursor, então permanece igual em todas as páginas.
+- `_id` é sempre anexado como última chave de ordenação. Registros sem valor (ou nulo) no campo de
+  ordenação continuam por último, e o desempate mantém a ordem total.
+- Sem `sort`, os registros voltam ordenados por `_id` crescente.
+- `next_cursor` só vem enquanto houver mais páginas; a última página (curta) o omite.
+- `offset` continua funcionando e é aplicado na primeira página quando não há `cursor`. Enviar
+  `cursor` e `offset` juntos usa o cursor e ignora o offset.
+- Cursor malformado, ou que não bate com o `sort` atual, retorna `400`.
+
+```bash
+# primeira página
+curl -s "$BASE/dbs/app/tables/notas/records?limit=50" -H "authorization: Bearer $KEY"
+# -> {"total":1200,...,"next_cursor":"eyJrIjpbLi4uXX0"}
+
+# próxima página
+curl -s "$BASE/dbs/app/tables/notas/records?limit=50&cursor=eyJrIjpbLi4uXX0" \
+  -H "authorization: Bearer $KEY"
+```
+
+O mesmo vale para `POST .../records/query`, que recebe `cursor` no corpo JSON.
 
 ### Merge parcial (`PATCH .../records/{id}`)
 
@@ -275,17 +303,19 @@ Retorna `groups`, cada um com `key` (valores de `group_by`), `count` e os nomes 
   "sort": ["-idade", {"field": "nome", "dir": "asc"}],
   "fields": ["nome", "endereco.cidade"],
   "limit": 20,
-  "offset": 0
+  "offset": 0,
+  "cursor": "eyJrIjpbLi4uXX0"
 }
 ```
 
 - **Operadores**: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$contains` (substring em string / pertence em array), `$starts_with`, `$ends_with`, `$regex`, `$and`, `$or`, `$not`. Igualdade é implícita: `{"tenant": "t1"}`.
 - **Caminhos**: `a.b` (objetos) e `tags.0` (índice de array). Filtro por `_id` funciona.
-- **Sort**: `"campo"`, `"-campo"` (desc) ou `{"field","dir"}`; nulos/ausentes sempre por último.
+- **Sort**: `"campo"`, `"-campo"` (desc) ou `{"field","dir"}`; nulos/ausentes sempre por último. Padrão: `_id` crescente.
 - **`fields`**: projeção (aceita caminhos aninhados); `_id` sempre incluído.
-- **`total`**: total filtrado antes de `limit`/`offset`.
+- **`total`**: total filtrado antes de `limit`/`offset`/`cursor`.
+- **`cursor`/`next_cursor`**: paginação keyset; veja [Paginação por cursor](#paginação-por-cursor-next_cursor--cursor).
 - Campos `encrypted` podem ser filtrados (decifra em memória).
-- Campos desconhecidos no corpo → `422`; operador/filtro inválido → `400`.
+- Campos desconhecidos no corpo → `422`; operador/filtro/cursor inválido → `400`.
 
 ## Exemplo rápido
 

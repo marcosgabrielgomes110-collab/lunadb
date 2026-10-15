@@ -70,7 +70,7 @@ pub async fn create(
     for grant in &req.grants {
         engine::validate_grant(grant)?;
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     if users
         .users
@@ -109,7 +109,7 @@ pub async fn delete(
     if user.0.id == id {
         return Err(AppError::BadRequest("cannot remove yourself".to_string()));
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let index = users
         .users
@@ -145,7 +145,7 @@ pub async fn set_grants(
     for grant in &req.grants {
         engine::validate_grant(grant)?;
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let target = users
         .users
@@ -174,7 +174,7 @@ pub async fn set_password(
     if !is_self {
         user.require_admin()?;
     }
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     if is_self && user.0.role != ROLE_ADMIN {
         let current = req.current_password.as_deref().ok_or_else(|| {

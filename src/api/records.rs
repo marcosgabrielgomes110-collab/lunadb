@@ -21,6 +21,7 @@ pub async fn list(
         "table": table,
         "total": outcome.total,
         "count": outcome.records.len(),
+        "next_cursor": outcome.next_cursor,
         "records": outcome.records,
     })))
 }
@@ -58,6 +59,7 @@ pub async fn query(
         "table": table,
         "total": outcome.total,
         "count": outcome.records.len(),
+        "next_cursor": outcome.next_cursor,
         "records": outcome.records,
     })))
 }

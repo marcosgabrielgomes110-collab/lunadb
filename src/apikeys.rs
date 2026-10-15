@@ -64,7 +64,7 @@ pub async fn create(
 ) -> Result<(ApiKeyPublic, String), AppError> {
     ensure_access(actor, target_id)?;
     let name = normalize_name(name)?;
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let target = users
         .users
@@ -127,7 +127,7 @@ pub async fn revoke(
     key_ref: &str,
 ) -> Result<ApiKeyPublic, AppError> {
     ensure_access(actor, target_id)?;
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let mut users: UsersFile = storage::read_json(&state.paths.users_file()).await?;
     let target = users
         .users

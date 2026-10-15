@@ -137,7 +137,7 @@ impl FromRequestParts<AppState> for AuthUser {
 }
 
 async fn touch_last_used(state: &AppState, user_id: &str, key_id: &str) {
-    let _guard = state.lock.write().await;
+    let _guard = state.lock_meta_write().await;
     let Ok(mut users) = storage::read_json::<UsersFile>(&state.paths.users_file()).await else {
         return;
     };

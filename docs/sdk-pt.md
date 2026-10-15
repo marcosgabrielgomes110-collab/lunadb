@@ -138,6 +138,41 @@ client.delete_record("app", "users", record["_id"])
 client.validate_record("app", "users", {"email": "c@x.com"})  # -> dict (dry-run)
 ```
 
+### Paginação por cursor
+
+`list_records_page` devolve a página inteira, com o cursor para a próxima:
+
+```python
+page = client.list_records_page("app", "users", limit=100)
+page.total        # tamanho da tabela, igual em todas as páginas
+page.count        # registros nesta página
+page.records      # tuple[dict, ...]
+page.next_cursor  # str | None (None na última página)
+
+# próxima página
+page = client.list_records_page("app", "users", limit=100, cursor=page.next_cursor)
+```
+
+Os iteradores cuidam do cursor para você e são estáveis sob inserções/remoções concorrentes
+(diferente do `offset`):
+
+```python
+for record in client.iter_records("app", "users", page_size=200):
+    ...
+
+# com filtro e ordenação
+for record in client.iter_query(
+    "app", "users",
+    filter={"idade": {"$gte": 18}},
+    sort=["-idade"],
+    page_size=200,
+    limit=5000,        # opcional: para depois de N registros
+):
+    ...
+```
+
+`list_records` continua retornando só a lista de registros, para compatibilidade.
+
 ### Query
 
 ```python

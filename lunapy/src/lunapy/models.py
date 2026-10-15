@@ -179,6 +179,7 @@ class QueryResult:
     total: int
     count: int
     records: tuple[dict[str, Any], ...]
+    next_cursor: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> QueryResult:
@@ -187,6 +188,27 @@ class QueryResult:
             total=int(data.get("total", len(records))),
             count=int(data.get("count", len(records))),
             records=tuple(records),
+            next_cursor=data.get("next_cursor"),
+        )
+
+
+@dataclass(frozen=True)
+class RecordPage:
+    """A page of records from the list endpoint."""
+
+    total: int
+    count: int
+    records: tuple[dict[str, Any], ...]
+    next_cursor: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RecordPage:
+        records = data.get("records") or []
+        return cls(
+            total=int(data.get("total", len(records))),
+            count=int(data.get("count", len(records))),
+            records=tuple(records),
+            next_cursor=data.get("next_cursor"),
         )
 
 

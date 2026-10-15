@@ -1,9 +1,15 @@
-use serde::{Deserialize, Deserializer};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::error::AppError;
+
+/// Sort applied when the caller does not provide one: records keyed by `_id`,
+/// which is guaranteed to be unique and stable.
+pub const ID_SORT_FIELD: &str = "_id";
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -18,6 +24,115 @@ pub struct QueryRequest {
     pub limit: Option<usize>,
     #[serde(default)]
     pub offset: Option<usize>,
+    /// Opaque keyset cursor returned as `next_cursor` by a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Decoded keyset cursor: the values of the sort tuple (including the `_id`
+/// tiebreaker) of the last record of the previous page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CursorData {
+    pub k: Vec<Value>,
+}
+
+/// The sort used for a page: the requested one, or `_id` ascending by default.
+pub fn effective_sort(sort: &[SortSpec]) -> Vec<SortSpec> {
+    if sort.is_empty() {
+        return vec![SortSpec {
+            field: ID_SORT_FIELD.to_string(),
+            dir: SortDir::Asc,
+        }];
+    }
+    sort.to_vec()
+}
+
+/// Appends the sort, `_id` ascending, to the key so ties are broken deterministically.
+pub fn cursor_key(record: &Value, sort: &[SortSpec]) -> Result<Vec<Value>, AppError> {
+    let mut key = Vec::with_capacity(sort.len() + 1);
+    for spec in sort {
+        if spec.field == ID_SORT_FIELD {
+            continue;
+        }
+        key.push(
+            get_path(record, &spec.field)
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    key.push(
+        record
+            .get(ID_SORT_FIELD)
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    Ok(key)
+}
+
+pub fn encode_cursor(key: &[Value]) -> Result<String, AppError> {
+    let data = CursorData { k: key.to_vec() };
+    let bytes = serde_json::to_vec(&data)
+        .map_err(|err| AppError::BadRequest(format!("could not encode cursor: {err}")))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Decodes a cursor. The key shape is `filter_sorts + _id`, so its arity is the
+/// number of sort fields (excluding `_id`) plus one.
+pub fn decode_cursor(cursor: &str, sort: &[SortSpec]) -> Result<CursorData, AppError> {
+    let invalid = || AppError::BadRequest("invalid cursor".to_string());
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor.as_bytes())
+        .map_err(|_| invalid())?;
+    let data: CursorData = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if data.k.len() != filter_sorts(sort).len() + 1 {
+        return Err(invalid());
+    }
+    Ok(data)
+}
+
+/// The requested sort without the `_id` tiebreaker, which is always appended last.
+pub fn filter_sorts(sort: &[SortSpec]) -> Vec<SortSpec> {
+    sort.iter()
+        .filter(|spec| spec.field != ID_SORT_FIELD)
+        .cloned()
+        .collect()
+}
+
+/// Compares a cursor key against a record key following `sort` order, applying
+/// the `_id` tiebreaker (ascending) at the end.
+pub fn key_after(key: &[Value], after: &[Value], sort: &[SortSpec]) -> bool {
+    for (index, spec) in filter_sorts(sort).iter().enumerate() {
+        let ordering = compare_component(
+            key.get(index).unwrap_or(&Value::Null),
+            after.get(index).unwrap_or(&Value::Null),
+            spec.dir,
+        );
+        if ordering != Ordering::Equal {
+            return ordering == Ordering::Greater;
+        }
+    }
+    let last = filter_sorts(sort).len();
+    let ordering = compare_component(
+        key.get(last).unwrap_or(&Value::Null),
+        after.get(last).unwrap_or(&Value::Null),
+        SortDir::Asc,
+    );
+    ordering == Ordering::Greater
+}
+
+fn compare_component(left: &Value, right: &Value, dir: SortDir) -> Ordering {
+    let ordering = match (left.is_null(), right.is_null()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => value_cmp(left, right),
+    };
+    match dir {
+        SortDir::Asc => ordering,
+        SortDir::Desc => ordering.reverse(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
@@ -414,6 +529,10 @@ pub fn sort_entries<T>(entries: &mut [T], sort: &[SortSpec], value_of: impl Fn(&
         let a = value_of(a);
         let b = value_of(b);
         for spec in sort {
+            // `_id` is unique: it cannot tie, so it is the total tiebreaker.
+            if spec.field == ID_SORT_FIELD {
+                continue;
+            }
             let left = get_path(a, &spec.field).filter(|value| !value.is_null());
             let right = get_path(b, &spec.field).filter(|value| !value.is_null());
             let ordering = match (left, right) {
@@ -432,7 +551,15 @@ pub fn sort_entries<T>(entries: &mut [T], sort: &[SortSpec], value_of: impl Fn(&
                 return ordering;
             }
         }
-        Ordering::Equal
+        // `_id` ascending, so paging by cursor never repeats or skips a record
+        let left = a.get(ID_SORT_FIELD).filter(|value| !value.is_null());
+        let right = b.get(ID_SORT_FIELD).filter(|value| !value.is_null());
+        match (left, right) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(left), Some(right)) => value_cmp(left, right),
+        }
     });
 }
 
@@ -629,6 +756,120 @@ mod tests {
             serde_json::from_value(json!({"sort": [{"field": "name", "direction": "desc"}]}))
                 .unwrap();
         assert_eq!(request.sort[0].dir, SortDir::Desc);
+    }
+
+    #[test]
+    fn sort_breaks_ties_by_id() {
+        let mut entries = vec![
+            json!({"_id": "b", "age": 30}),
+            json!({"_id": "a", "age": 30}),
+            json!({"_id": "c", "age": 30}),
+        ];
+        let sort = vec![SortSpec {
+            field: "age".to_string(),
+            dir: SortDir::Asc,
+        }];
+        sort_entries(&mut entries, &sort, |entry| entry);
+        let ids: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn default_sort_is_id_ascending() {
+        let sort = effective_sort(&[]);
+        assert_eq!(sort.len(), 1);
+        assert_eq!(sort[0].field, ID_SORT_FIELD);
+        assert_eq!(sort[0].dir, SortDir::Asc);
+        let explicit = vec![SortSpec {
+            field: "name".to_string(),
+            dir: SortDir::Desc,
+        }];
+        assert_eq!(effective_sort(&explicit).len(), 1);
+    }
+
+    #[test]
+    fn cursor_roundtrip_and_validation() {
+        let sort = vec![
+            SortSpec {
+                field: "age".to_string(),
+                dir: SortDir::Asc,
+            },
+            SortSpec {
+                field: "name".to_string(),
+                dir: SortDir::Desc,
+            },
+        ];
+        let key = vec![json!(30), json!("Ana"), json!("id-1")];
+        let cursor = encode_cursor(&key).unwrap();
+        assert!(
+            !cursor.contains('='),
+            "cursor must be url-safe without padding"
+        );
+        let decoded = decode_cursor(&cursor, &sort).unwrap();
+        assert_eq!(decoded.k, key);
+
+        assert!(decode_cursor("not-base64!", &sort).is_err());
+        assert!(
+            decode_cursor(&cursor, &sort[..1]).is_err(),
+            "arity mismatch"
+        );
+        assert!(decode_cursor(&encode_cursor(&key[..2]).unwrap(), &sort).is_err());
+    }
+
+    #[test]
+    fn key_after_walks_sort_then_id() {
+        let asc = vec![SortSpec {
+            field: "age".to_string(),
+            dir: SortDir::Asc,
+        }];
+        assert!(key_after(
+            &[json!(31), json!("a")],
+            &[json!(30), json!("z")],
+            &asc
+        ));
+        assert!(!key_after(
+            &[json!(30), json!("a")],
+            &[json!(30), json!("z")],
+            &asc
+        ));
+        // same age: the _id tiebreaker still advances
+        assert!(key_after(
+            &[json!(30), json!("z")],
+            &[json!(30), json!("a")],
+            &asc
+        ));
+
+        let desc = vec![SortSpec {
+            field: "age".to_string(),
+            dir: SortDir::Desc,
+        }];
+        assert!(key_after(
+            &[json!(29), json!("a")],
+            &[json!(30), json!("z")],
+            &desc
+        ));
+    }
+
+    #[test]
+    fn key_after_handles_nulls() {
+        let asc = vec![SortSpec {
+            field: "age".to_string(),
+            dir: SortDir::Asc,
+        }];
+        // nulls sort last, so a null key is after any present value
+        assert!(key_after(
+            &[json!(null), json!("a")],
+            &[json!(1), json!("z")],
+            &asc
+        ));
+        assert!(!key_after(
+            &[json!(1), json!("a")],
+            &[json!(null), json!("z")],
+            &asc
+        ));
     }
 
     #[test]

@@ -209,16 +209,59 @@ fn migrate_command(paths: &config::Paths, to: &str, force: bool) -> anyhow::Resu
 }
 
 fn server_running(paths: &config::Paths) -> bool {
-    let Ok(raw) = std::fs::read_to_string(paths.status_file()) else {
+    let Some(status) = read_status(paths) else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    let Some(pid) = status.get("pid").and_then(|pid| pid.as_u64()) else {
         return false;
     };
-    let Some(pid) = value.get("pid").and_then(|pid| pid.as_u64()) else {
-        return false;
-    };
+    process_alive(pid)
+}
+
+fn read_status(paths: &config::Paths) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(paths.status_file()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Whether `pid` is a live process. The status file can outlive a crashed server,
+/// so a bare file check is not enough.
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u64) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(target_os = "macos")]
+fn process_alive(pid: u64) -> bool {
+    // kill(pid, 0) succeeds for live processes and fails with ESRCH otherwise;
+    // EPERM means the process exists but belongs to another user.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u64) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        // STILL_ACTIVE is an NTSTATUS (i32) with the value 259, so compare as i32.
+        ok && code as i32 == STILL_ACTIVE
+    }
+}
+
+/// Fallback for other Unix platforms (and for builds without extra dependencies):
+/// the process is considered alive only while its own status file is present.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_alive(_pid: u64) -> bool {
+    true
 }
 
 fn run_apikey(base_url: String, api_key: String, action: ApiKeyAction) -> anyhow::Result<()> {
@@ -365,4 +408,53 @@ fn resolve_config_path(cli: &Cli) -> PathBuf {
         return PathBuf::from(path);
     }
     config::expand_home("~/.lunadb/config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths_in(dir: &std::path::Path) -> config::Paths {
+        let mut config = config::Config::default();
+        config.storage.path = dir.to_string_lossy().to_string();
+        config::Paths::from_config(&config)
+    }
+
+    #[test]
+    fn own_process_is_alive() {
+        assert!(process_alive(std::process::id() as u64));
+    }
+
+    #[test]
+    fn missing_status_file_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!server_running(&paths_in(dir.path())));
+    }
+
+    #[test]
+    fn stale_status_file_does_not_report_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        runtime().unwrap().block_on(paths.ensure()).unwrap();
+        runtime()
+            .unwrap()
+            .block_on(storage::write_json(
+                &paths.status_file(),
+                &serde_json::json!({"pid": u32::MAX, "version": "0"}),
+            ))
+            .unwrap();
+        assert!(
+            !server_running(&paths),
+            "a leftover status file must not block migrate"
+        );
+    }
+
+    #[test]
+    fn malformed_status_file_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        runtime().unwrap().block_on(paths.ensure()).unwrap();
+        std::fs::write(paths.status_file(), b"not json").unwrap();
+        assert!(!server_running(&paths));
+    }
 }

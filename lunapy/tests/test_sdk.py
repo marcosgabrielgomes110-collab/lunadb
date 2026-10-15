@@ -367,3 +367,49 @@ def uuid_suffix() -> str:
     import uuid
 
     return uuid.uuid4().hex[:8]
+
+
+def test_cursor_pagination_sdk(admin, db):
+    admin.create_table(db, "items")
+    expected = []
+    for index in range(7):
+        record = admin.create_record(db, "items", {"n": index})
+        expected.append(record["_id"])
+    expected.sort()
+
+    # explicit cursor walk, page by page
+    collected = []
+    cursor = None
+    while True:
+        page = admin.list_records_page(db, "items", limit=3, cursor=cursor)
+        assert page.total == 7
+        collected.extend(record["_id"] for record in page.records)
+        if not page.next_cursor:
+            break
+        cursor = page.next_cursor
+    assert collected == expected, "cursor walk must not skip or repeat"
+
+    # iterator helpers hide the cursor bookkeeping
+    walked = [record["_id"] for record in admin.iter_records(db, "items", page_size=2)]
+    assert walked == expected
+    assert len(list(admin.iter_records(db, "items", page_size=2, limit=3))) == 3
+    assert [record["_id"] for record in admin.iter_records(db, "items", page_size=3, offset=2)] == expected[2:]
+
+    # query walk keeps the sort order across pages
+    ordered = [record["n"] for record in admin.iter_query(db, "items", sort=["-n"], page_size=2)]
+    assert ordered == [6, 5, 4, 3, 2, 1, 0]
+
+    filtered = [
+        record["n"]
+        for record in admin.iter_query(
+            db, "items", filter={"n": {"$gte": 4}}, sort=["n"], page_size=2
+        )
+    ]
+    assert filtered == [4, 5, 6]
+
+
+def test_invalid_cursor_is_rejected(admin, db):
+    admin.create_table(db, "t", schema=None)
+    admin.create_record(db, "t", {"x": 1})
+    with pytest.raises(LunaBadRequestError):
+        admin.list_records_page(db, "t", limit=1, cursor="not-a-valid-cursor")

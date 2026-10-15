@@ -27,8 +27,11 @@ grants, and hashed API keys. It ships with a CLI/REPL and an official, dependenc
 - **Queries**: filters (`$eq`, `$gt`, `$in`, `$exists`, `$contains`, `$regex`, `$and`, `$or`, `$not`, ...),
   nested paths, multi-field sort, projection, pagination, and grouped aggregations
   (`count`/`sum`/`avg`/`min`/`max`).
+- **Cursor pagination**: `next_cursor`/`cursor` keyset paging that is stable under concurrent writes,
+  alongside the classic `limit`/`offset`.
 - **Operations**: structured logging with rotation, Prometheus `/metrics`, request body limits
-  and timeouts, graceful shutdown.
+  and timeouts, graceful shutdown, and per-table read/write locking so writes to different
+  tables run in parallel.
 - **Tooling**: interactive shell (`lunadb shell`), non-interactive `apikey` commands, a `Makefile`,
   and a Python SDK (`lunapy`).
 

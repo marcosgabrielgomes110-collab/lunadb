@@ -7,6 +7,7 @@ pub mod config;
 pub mod crypto;
 pub mod engine;
 pub mod error;
+pub mod locks;
 pub mod metrics;
 pub mod models;
 pub mod query;

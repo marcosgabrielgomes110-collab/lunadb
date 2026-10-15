@@ -21,6 +21,8 @@ commands:
   schema update-field <db> <t> <field> <json> [--force]
   schema unique add|rm <db> <t> <field|field1+field2> [--force]
   list <db> <t> [limit] [offset]  lists records
+  list-next <db> <t> <cursor> [limit]   next page from a cursor
+  walk <db> <t> [page-size]       streams every record using cursors
   get <db> <t> <id>
   add <db> <t> '<json>'           json in single quotes
   put <db> <t> <id> '<json>'
@@ -191,6 +193,39 @@ fn execute(client: &mut Client, line: &str) -> anyhow::Result<Option<String>> {
             Some(pretty(
                 client.get(&format!("/dbs/{db}/tables/{table}/records{params}"))?,
             ))
+        }
+        ("list-next", [db, table, cursor, rest @ ..]) => {
+            let limit = match rest.first() {
+                Some(limit) => format!("&limit={}", limit.parse::<usize>()?),
+                None => String::new(),
+            };
+            Some(pretty(client.get(&format!(
+                "/dbs/{db}/tables/{table}/records?cursor={cursor}{limit}"
+            ))?))
+        }
+        ("walk", [db, table, rest @ ..]) => {
+            let page_size = match rest.first() {
+                Some(size) => size.parse::<usize>()?,
+                None => 100,
+            };
+            let mut cursor: Option<String> = None;
+            let mut seen = 0usize;
+            loop {
+                let mut path = format!("/dbs/{db}/tables/{table}/records?limit={page_size}");
+                if let Some(cursor) = &cursor {
+                    path.push_str(&format!("&cursor={cursor}"));
+                }
+                let page = client.get(&path)?;
+                for record in page["records"].as_array().unwrap_or(&Vec::new()) {
+                    println!("{}", serde_json::to_string(record)?);
+                    seen += 1;
+                }
+                match page["next_cursor"].as_str() {
+                    Some(next) => cursor = Some(next.to_string()),
+                    None => break,
+                }
+            }
+            Some(format!("{seen} record(s)"))
         }
         ("get", [db, table, id]) => Some(pretty(
             client.get(&format!("/dbs/{db}/tables/{table}/records/{id}"))?,
