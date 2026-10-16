@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=84"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -20,7 +20,7 @@ Repository = "https://github.com/marcosgabrielgomes110-collab/lunadb"
 Documentation = "https://github.com/marcosgabrielgomes110-collab/lunadb/blob/main/docs/sdk.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=9.1.1", "setuptools>=84"]
+dev = ["pytest>=9.1.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
