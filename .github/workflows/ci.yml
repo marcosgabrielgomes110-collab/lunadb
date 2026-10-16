@@ -55,3 +55,21 @@ jobs:
         env:
           PYTHONPATH: lunapy/src
         run: python -m pytest lunapy/tests -q
+
+  setup-script:
+    name: luna-setup script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build server
+        run: cargo build
+      # dash is a strict POSIX shell: running the script under it catches
+      # bash-only constructs that /bin/sh (bash on most runners) would hide.
+      - name: Install dash
+        run: sudo apt-get update && sudo apt-get install -y dash
+      - name: Smoke test (dash)
+        run: dash scripts/test-luna-setup.sh target/debug/lunadb
+      - name: Smoke test (sh)
+        run: sh scripts/test-luna-setup.sh target/debug/lunadb

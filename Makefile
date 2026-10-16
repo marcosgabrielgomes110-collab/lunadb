@@ -25,7 +25,7 @@ DESTDIR ?=
 
 .PHONY: help build release check fmt fmt-check clippy lint test test-rust test-py \
         venv run serve init shell migrate apikey install uninstall clean distclean \
-        luna-setup
+        luna-setup test-setup
 
 help:
 	@echo "LunaDB - available targets:"
@@ -48,6 +48,7 @@ help:
 	@echo "  migrate     Converts tables (TO=json|msgpack, FORCE=1)"
 	@echo "  apikey      API key commands (ARGS=\"list\" etc.)"
 	@echo "  luna-setup  Interactive config.toml generator (Enter = default)"
+	@echo "  test-setup  Smoke test for the luna-setup script (needs a build)"
 	@echo "  install     Installs ONLY the binary to PREFIX/bin (default /usr/local)"
 	@echo "  uninstall   Removes the installed binary"
 	@echo "  clean       Removes Cargo artifacts"
@@ -118,6 +119,12 @@ apikey:
 #   make luna-setup ARGS="--config /tmp/luna/config.toml --force"
 luna-setup:
 	sh scripts/luna-setup.sh $(ARGS)
+
+# Smoke test for the setup script; runs the same checks as CI. Use SH=dash to
+# verify strict POSIX compliance.
+SH ?= sh
+test-setup: build
+	$(SH) scripts/test-luna-setup.sh target/debug/lunadb
 
 # Installs only the compiled binary (release) to $(DESTDIR)$(BINDIR).
 install: release
