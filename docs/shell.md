@@ -1,6 +1,6 @@
 # Shell and CLI
 
-> See also: [HTTP API](api.md) · [Python SDK](sdk.md)
+> See also: [HTTP API](api.md) · [Python SDK](sdk.md) · [Operations](operations.md)
 
 The `lunadb` binary has two uses:
 

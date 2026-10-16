@@ -1,6 +1,6 @@
 # SDK Python (`lunapy`)
 
-> Veja também: [API HTTP](api.md) · [Shell/CLI](shell.md)
+> Veja também: [API HTTP](api.md) · [Shell/CLI](shell.md) · [Operação](operations-pt.md)
 
 Cliente oficial sem dependências externas (apenas stdlib). Fala com a API via HTTP.
 

@@ -134,6 +134,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 - [HTTP API](docs/api.md)
 - [Shell and CLI](docs/shell.md)
 - [Python SDK](docs/sdk.md)
+- [Operations](docs/operations.md) — layout on disk, backup, logs, and troubleshooting
 
 Portuguese versions are available alongside each document (for example
 [`docs/api-pt.md`](docs/api-pt.md)).

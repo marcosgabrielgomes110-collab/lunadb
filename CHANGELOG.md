@@ -17,6 +17,15 @@ All notable changes to this project are documented in this file. The format is b
 - Portability: the `migrate` server-running check works on Linux, macOS, and Windows.
 - `make luna-setup` (and `scripts/luna-setup.sh`): interactive `config.toml` generator with
   defaults on Enter, a random root password option, and a `600` file mode.
+- `scripts/test-luna-setup.sh` and `make test-setup`: end-to-end smoke test for the setup
+  script, also run by CI under `dash` and `sh`.
+- [Operations guide](docs/operations.md): on-disk layout, backup, logs, and troubleshooting
+  (with a Portuguese version).
+
+### Changed
+
+- Dependencies: `base64` 0.23, `tower-http` 0.7, `actions/checkout` v7, `actions/setup-python`
+  v7, and `pytest>=9.1.1`.
 
 ### Changed
 
