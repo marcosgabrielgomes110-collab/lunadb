@@ -20,7 +20,7 @@ Repository = "https://github.com/marcosgabrielgomes110-collab/lunadb"
 Documentation = "https://github.com/marcosgabrielgomes110-collab/lunadb/blob/main/docs/sdk.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=9.1.1", "setuptools>=84"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
