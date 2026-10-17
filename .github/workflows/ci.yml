@@ -73,3 +73,20 @@ jobs:
         run: dash scripts/test-luna-setup.sh target/debug/lunadb
       - name: Smoke test (sh)
         run: sh scripts/test-luna-setup.sh target/debug/lunadb
+
+  # Dependabot bumps versions weekly but does not fail a build on a CVE, so
+  # audit the resolved dependency set on every push and pull request.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install audit tools
+        run: |
+          cargo install --locked cargo-audit pip-audit
+      - name: Cargo audit
+        run: cargo audit
+      - name: Python audit
+        run: pip-audit lunapy

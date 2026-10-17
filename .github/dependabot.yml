@@ -1,15 +1,30 @@
 version: 2
+# Weekly dependency updates. Minor and patch bumps are grouped per ecosystem so
+# a run opens one reviewable PR per group instead of one PR per crate/package;
+# majors stay separate because they usually need code changes.
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: pip
     directory: "/lunapy"
     schedule:
       interval: weekly
+    groups:
+      pip-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
