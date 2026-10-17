@@ -54,6 +54,35 @@ servidor parado.
 A chave mestra faz parte do backup e é necessária para ler campos criptografados. Guarde-a
 também em local separado e seguro; manter a única cópia junto dos dados anula o propósito dela.
 
+## Capacidade e limitações conhecidas
+
+O LunaDB guarda **um arquivo por tabela** e mantém a tabela inteira em memória durante a
+requisição. Toda mutação lê o arquivo, altera e grava de volta atomicamente, então o custo de
+uma escrita cresce com o tamanho da tabela:
+
+- **Uma escrita de registro regrava a tabela inteira.** Inserir um registro numa tabela de 100
+  mil registros codifica e faz fsync de todos os 100 mil. As escritas continuam corretas e
+  seguras, mas não escalam linearmente.
+- **Escritas na mesma tabela são serializadas** (lock de escrita por tabela). Escritas em
+  tabelas diferentes rodam em paralelo.
+- **Índices `unique` são reconstruídos a cada escrita.** Com campos `unique` no schema, cada
+  insert/update percorre todos os registros de novo, somando outra passada completa.
+- **Leituras decodificam a tabela inteira** e depois aplicam filtro, ordenação e paginação em
+  memória. `limit`/`cursor` limitam o tamanho da resposta, não o trabalho feito.
+
+Orientação prática, na 0.0.1:
+
+| Tamanho da tabela | Comportamento |
+|---|---|
+| até ~10 mil registros | confortável para uso interativo |
+| ~10 mil a 100 mil | cada escrita recodifica o arquivo; agrupe o trabalho em menos requisições maiores |
+| acima de ~100 mil | não recomendado; divida os dados em várias tabelas |
+
+**Não há transações multi-tabela** nem índices secundários além de `unique` — uma operação toca
+exatamente um arquivo de tabela, então consistência entre tabelas é responsabilidade do cliente.
+Como o formato é pré-1.0, trate esses números como orientação operacional e não como contrato;
+meça com o tamanho real dos seus registros antes de confiar neles.
+
 ## Saúde, status e métricas
 
 | Endpoint | Auth | Para que serve |

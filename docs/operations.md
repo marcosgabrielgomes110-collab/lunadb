@@ -53,6 +53,35 @@ catch a table between two changes, so a stopped copy is what you should rely on.
 The master key is part of the backup and is required to read encrypted fields. Keep it in a
 separate, safe place as well; storing the only copy next to the data defeats its purpose.
 
+## Capacity and known limitations
+
+LunaDB stores **one file per table** and keeps the whole table in memory while a request runs.
+Every mutation reads the file, changes it, and writes it back atomically, so the cost of a write
+grows with the size of the table:
+
+- **A single record write rewrites the whole table.** Inserting one record into a table of 100k
+  records encodes and fsyncs all 100k entries. Writes stay correct and safe, but they do not
+  scale linearly.
+- **Writes to the same table are serialized** (per-table write lock). Writes to different tables
+  run in parallel.
+- **Unique indexes are rebuilt per write.** When a schema has `unique` fields, the index is
+  scanned from every record on each insert/update, which adds another full pass over the table.
+- **Reads decode the whole table** and then apply the filter, sort, and pagination in memory.
+  `limit`/`cursor` bound the response size, not the work done.
+
+Practical guidance, as of 0.0.1:
+
+| Table size | Behaviour |
+|---|---|
+| up to ~10k records | comfortable for interactive use |
+| ~10k–100k records | every write re-encodes the file; batch work into fewer, larger requests where possible |
+| above ~100k records | not recommended; split the data across several tables |
+
+There are **no multi-table transactions** and no secondary indexes other than `unique` — an
+operation touches exactly one table file, so cross-table consistency is the client's job.
+Because the format is pre-1.0, treat these numbers as operational advice rather than a contract;
+measure with your own record sizes before relying on them.
+
 ## Health, status, and metrics
 
 | Endpoint | Auth | Purpose |

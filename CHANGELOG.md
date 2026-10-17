@@ -8,8 +8,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- **Cursor (keyset) pagination** for listing and querying records: `next_cursor` in responses and a
-  `cursor` parameter/field. Stable under concurrent inserts and deletes, unlike `offset`.
+- **Cursor (keyset) pagination** for listing and querying records: `next_cursor` in responses and
+  a `cursor` parameter/field. Stable under concurrent inserts and deletes, unlike `offset`.
 - Python SDK helpers `list_records_page`, `iter_records`, and `iter_query`; shell commands
   `list-next` and `walk`.
 - Per-table and per-database read/write locks, so writes to different tables run in parallel
@@ -20,19 +20,30 @@ All notable changes to this project are documented in this file. The format is b
 - `scripts/test-luna-setup.sh` and `make test-setup`: end-to-end smoke test for the setup
   script, also run by CI under `dash` and `sh`.
 - [Operations guide](docs/operations.md): on-disk layout, backup, logs, and troubleshooting
-  (with a Portuguese version).
+  (with a Portuguese version), now including a capacity and known-limitations section.
+- CI: a dependency audit job (`cargo audit` and `pip-audit`) that fails on known
+  vulnerabilities.
 
 ### Changed
 
 - Dependencies: `base64` 0.23, `tower-http` 0.7, `actions/checkout` v7, `actions/setup-python`
-  v7, and `pytest>=9.1.1`.
-
-### Changed
-
+  v7, and `pytest>=9.1.1`. The Python SDK builds with `setuptools>=84`.
 - Reads of a table file now take a shared lock, so a response can no longer observe a partially
   written table.
 - `create_db`/`delete_db` update the database registry under the metadata lock, closing a race
   between concurrent create and delete.
+- Dependabot groups minor and patch updates per ecosystem, so a weekly run opens far fewer PRs.
+
+### Fixed
+
+- The CHANGELOG listed the 0.0.1 feature set under `Unreleased` and repeated the `Changed`
+  heading; the 0.0.1 entries are now under their own release.
+
+## [0.0.1] - 2026-10-09
+
+First public release.
+
+### Added
 
 - HTTP API for databases, tables, schemas, records, and queries, built with `axum`.
 - Schema DSL with typed fields, constraints, enums, defaults, `strict` mode, `auto`
@@ -51,4 +62,5 @@ All notable changes to this project are documented in this file. The format is b
 - Official Python SDK (`lunapy`) with typed models and errors.
 - `Makefile` with build, test, lint, run, migrate, and install targets.
 
-[Unreleased]: https://github.com/marcosgabrielgomes110-collab/lunadb/commits/main
+[Unreleased]: https://github.com/marcosgabrielgomes110-collab/lunadb/compare/v0.0.1...HEAD
+[0.0.1]: https://github.com/marcosgabrielgomes110-collab/lunadb/releases/tag/v0.0.1
