@@ -42,6 +42,8 @@ All notable changes to this project are documented in this file. The format is b
   wins and the offset is ignored).
 - `next_cursor` is omitted when no records remain, avoiding an extra empty page at the end of a
   walk when the remaining records fit exactly in the page size.
+- The dependency audit job installs `pip-audit` with `pip` instead of `cargo`, which has no such
+  crate; the job previously failed before running either audit.
 - The CHANGELOG listed the 0.0.1 feature set under `Unreleased` and repeated the `Changed`
   heading; the 0.0.1 entries are now under their own release.
 

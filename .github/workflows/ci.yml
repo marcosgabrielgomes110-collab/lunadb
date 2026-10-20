@@ -83,10 +83,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Install audit tools
         run: |
-          cargo install --locked cargo-audit pip-audit
+          cargo install --locked cargo-audit
+          python -m pip install --upgrade pip pip-audit
       - name: Cargo audit
         run: cargo audit
       - name: Python audit
-        run: pip-audit lunapy
+        run: python -m pip_audit lunapy
