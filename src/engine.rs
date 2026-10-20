@@ -471,26 +471,30 @@ pub async fn list_records(
     let offset = params.offset.unwrap_or(0);
     let mut records = Vec::new();
     let mut last_key: Option<Vec<Value>> = None;
+    let mut skipped = 0usize;
+    let mut has_more = false;
     for (id, raw) in file.records.iter() {
         let decoded = decode_record(&state.keyring, db, file.schema.as_ref(), raw)?;
         let value = with_id(id, &decoded);
+        let key = query::cursor_key(&value, &sort)?;
         if let Some(cursor) = &cursor {
-            let key = query::cursor_key(&value, &sort)?;
+            // A cursor already encodes the offset, so `offset` is ignored.
             if !query::key_after(&key, &cursor.k, &sort) {
                 continue;
             }
+        } else if skipped < offset {
+            skipped += 1;
+            continue;
         }
-        if records.len() >= limit {
+        // Look one record past the page to know whether a cursor is needed.
+        if records.len() == limit {
+            has_more = true;
             break;
         }
-        last_key = Some(query::cursor_key(&value, &sort)?);
+        last_key = Some(key);
         records.push(value);
     }
-    let page_full = records.len() == limit;
-    if cursor.is_none() && offset > 0 {
-        records.drain(..offset.min(records.len()));
-    }
-    let next_cursor = if page_full {
+    let next_cursor = if has_more {
         last_key.map(|key| query::encode_cursor(&key)).transpose()?
     } else {
         None
@@ -715,11 +719,15 @@ pub async fn query_records(
             entries.drain(..offset.min(entries.len()));
         }
     }
+    let has_more = entries.len() > limit;
     entries.truncate(limit);
-    let page_full = entries.len() == limit;
-    let next_cursor = match (page_full, entries.last()) {
-        (true, Some((_, _, key))) => Some(query::encode_cursor(key)?),
-        _ => None,
+    let next_cursor = if has_more {
+        entries
+            .last()
+            .map(|(_, _, key)| query::encode_cursor(key))
+            .transpose()?
+    } else {
+        None
     };
     let records = entries
         .into_iter()

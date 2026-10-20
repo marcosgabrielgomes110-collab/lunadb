@@ -853,6 +853,136 @@ async fn record_patch_list_total_and_aggregate() {
 }
 
 #[tokio::test]
+async fn list_applies_offset_before_limit() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+    let (_, _) = server
+        .request("POST", "/dbs", Some(&root), Some(json!({"name": "paging"})))
+        .await;
+    let (_, _) = server
+        .request(
+            "POST",
+            "/dbs/paging/tables",
+            Some(&root),
+            Some(json!({"name": "items"})),
+        )
+        .await;
+
+    let mut expected = Vec::new();
+    for index in 0..4 {
+        let (status, record) = server
+            .request(
+                "POST",
+                "/dbs/paging/tables/items/records",
+                Some(&root),
+                Some(json!({"n": index})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+        expected.push(record["_id"].as_str().unwrap().to_string());
+    }
+    expected.sort();
+
+    // The offset must be applied before the limit, so this is the second page.
+    let (status, body) = server
+        .request(
+            "GET",
+            "/dbs/paging/tables/items/records?limit=2&offset=2",
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(2));
+    let ids = body["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| record["_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        expected[2..].iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert!(
+        body["next_cursor"].is_null(),
+        "the last page must not return a cursor"
+    );
+
+    // A full page with no records left also omits next_cursor.
+    let (status, body) = server
+        .request(
+            "GET",
+            "/dbs/paging/tables/items/records?limit=2",
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(2));
+    let cursor = body["next_cursor"]
+        .as_str()
+        .expect("first page has a next cursor")
+        .to_string();
+
+    // A cursor already carries the position, so offset must be ignored.
+    let (status, body) = server
+        .request(
+            "GET",
+            &format!("/dbs/paging/tables/items/records?limit=2&cursor={cursor}&offset=99"),
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(2), "cursor must ignore offset");
+    assert!(body["next_cursor"].is_null());
+
+    // An offset beyond the table size returns an empty page.
+    let (status, body) = server
+        .request(
+            "GET",
+            "/dbs/paging/tables/items/records?limit=2&offset=99",
+            Some(&root),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(0));
+    assert!(body["next_cursor"].is_null());
+
+    // The query endpoint follows the same exact-page rule.
+    let (status, page) = server
+        .request(
+            "POST",
+            "/dbs/paging/tables/items/records/query",
+            Some(&root),
+            Some(json!({"limit": 2})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["count"], json!(2));
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+    let (status, page) = server
+        .request(
+            "POST",
+            "/dbs/paging/tables/items/records/query",
+            Some(&root),
+            Some(json!({"limit": 2, "cursor": cursor})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["count"], json!(2));
+    assert!(
+        page["next_cursor"].is_null(),
+        "an exact page must not return a cursor when nothing remains"
+    );
+}
+
+#[tokio::test]
 async fn login_is_rate_limited() {
     let server = TestServer::spawn().await;
     for _ in 0..5 {

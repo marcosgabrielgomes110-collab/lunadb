@@ -26,6 +26,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Table, metadata, and status writes now fsync the temporary file and the parent directory before returning, so an acknowledged write is durable across a crash and the behavior matches the operations guide.
 - Dependencies: `base64` 0.23, `tower-http` 0.7, `actions/checkout` v7, `actions/setup-python`
   v7, and `pytest>=9.1.1`. The Python SDK builds with `setuptools>=84`.
 - Reads of a table file now take a shared lock, so a response can no longer observe a partially
@@ -36,6 +37,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- `GET .../records` applies `offset` before `limit`, so `limit=10&offset=10` returns the second
+  page instead of an empty one; the same rule still holds when a cursor is supplied (the cursor
+  wins and the offset is ignored).
+- `next_cursor` is omitted when no records remain, avoiding an extra empty page at the end of a
+  walk when the remaining records fit exactly in the page size.
 - The CHANGELOG listed the 0.0.1 feature set under `Unreleased` and repeated the `Changed`
   heading; the 0.0.1 entries are now under their own release.
 
