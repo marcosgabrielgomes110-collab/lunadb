@@ -29,6 +29,8 @@ All notable changes to this project are documented in this file. The format is b
 - Table, metadata, and status writes now fsync the temporary file and the parent directory before returning, so an acknowledged write is durable across a crash and the behavior matches the operations guide.
 - Dependencies: `base64` 0.23, `tower-http` 0.7, `actions/checkout` v7, `actions/setup-python`
   v7, and `pytest>=9.1.1`. The Python SDK builds with `setuptools>=84`.
+- Transitive TLS dependencies updated to address RUSTSEC-2026-0346/0347/0348/0349/0381/0382:
+  `rustls` 0.23.46, `rustls-webpki` 0.103.16, and `webpki-roots` 1.0.10.
 - Reads of a table file now take a shared lock, so a response can no longer observe a partially
   written table.
 - `create_db`/`delete_db` update the database registry under the metadata lock, closing a race
