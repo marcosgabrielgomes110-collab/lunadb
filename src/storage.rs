@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
-use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -54,57 +53,38 @@ pub async fn read_value<T: DeserializeOwned + Default>(path: &Path) -> anyhow::R
     }
 }
 
+pub async fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    tokio::fs::create_dir_all(parent).await?;
+
+    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+    }
+
+    tokio::fs::rename(&tmp, path).await?;
+
+    // Fsync the parent directory so directory metadata changes are durable
+    if let Ok(dir) = tokio::fs::File::open(parent).await {
+        let _ = dir.sync_all().await;
+    }
+
+    Ok(())
+}
+
 pub async fn write_value<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let body = encode(format_of(path), value)?;
-    write_atomic(path, &body).await
-}
-
-/// Writes `body` to `path` atomically and durably: the data is flushed to the
-/// temporary file before the rename, and the parent directory is synced after
-/// it, so a crash cannot leave a torn file or lose the rename.
-async fn write_atomic(path: &Path, body: &[u8]) -> anyhow::Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
-    let result = async {
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(body).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, path).await?;
-        sync_parent_dir(path).await?;
-        Ok::<(), std::io::Error>(())
-    }
-    .await;
-    if result.is_err() {
-        // A failed write must not leave a temp file behind. After a successful
-        // rename the temp file no longer exists, so this is a no-op.
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result.map_err(Into::into)
-}
-
-#[cfg(unix)]
-async fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-    // fsync on a directory makes the rename durable, not just the file content.
-    tokio::fs::File::open(parent).await?.sync_all().await
-}
-
-#[cfg(not(unix))]
-async fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
-    // Windows has no portable equivalent of fsync on a directory. The file
-    // content itself was already synced before the rename.
-    Ok(())
+    atomic_write_bytes(path, &body).await
 }
 
 pub async fn read_json<T: DeserializeOwned + Default>(path: &Path) -> anyhow::Result<T> {
@@ -117,7 +97,7 @@ pub async fn read_json<T: DeserializeOwned + Default>(path: &Path) -> anyhow::Re
 
 pub async fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let body = serde_json::to_vec_pretty(value)?;
-    write_atomic(path, &body).await
+    atomic_write_bytes(path, &body).await
 }
 
 #[cfg(test)]
