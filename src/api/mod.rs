@@ -15,7 +15,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing::Span;
+use axum::http::HeaderValue;
+use axum::http::header::{X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
 
 use crate::state::AppState;
 
@@ -23,7 +27,8 @@ pub fn router(state: AppState) -> Router {
     let metrics = state.metrics.clone();
     let max_body_bytes = state.config.server.max_body_bytes;
     let timeout = Duration::from_secs(state.config.server.request_timeout_secs.max(1));
-    Router::new()
+    let cors_origins = state.config.server.cors_allowed_origins.clone();
+    let base_router = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(status::metrics))
         .route("/status", get(status::status))
@@ -118,7 +123,38 @@ pub fn router(state: AppState) -> Router {
                     },
                 ),
         )
-        .with_state(state)
+        .layer(SetResponseHeaderLayer::overriding(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ));
+
+    let app = if cors_origins.is_empty() {
+        base_router
+    } else if cors_origins.contains(&"*".to_string()) {
+        base_router.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+    } else {
+        let origins: Vec<_> = cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        base_router.layer(
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+    };
+
+    app.with_state(state)
 }
 
 async fn health() -> Json<Value> {

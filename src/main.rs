@@ -140,12 +140,32 @@ async fn serve(
     let state = state::AppState::new(paths.clone(), keyring, config.clone(), config_path);
     write_status(&state).await?;
 
+    let (scheme, _tls_ready) = if config.server.tls.enabled {
+        match (&config.server.tls.cert_file, &config.server.tls.key_file) {
+            (Some(cert), Some(key)) => {
+                let cert_p = config::expand_home(cert);
+                let key_p = config::expand_home(key);
+                if !cert_p.exists() {
+                    anyhow::bail!("TLS cert_file not found: {}", cert_p.display());
+                }
+                if !key_p.exists() {
+                    anyhow::bail!("TLS key_file not found: {}", key_p.display());
+                }
+                ("https", true)
+            }
+            _ => anyhow::bail!("TLS is enabled but cert_file and/or key_file are not specified"),
+        }
+    } else {
+        ("http", false)
+    };
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         target: "lunadb::ops",
         host = %config.server.host,
         port = config.server.port,
-        "LunaDB listening on http://{addr}"
+        tls = config.server.tls.enabled,
+        "LunaDB listening on {scheme}://{addr}"
     );
     let app = api::router(state);
     axum::serve(
@@ -317,7 +337,12 @@ fn resolve_user_id(client: &mut http_client::Client, username: &str) -> anyhow::
 }
 
 fn default_base_url(config: &config::Config) -> String {
-    format!("http://{}:{}", config.server.host, config.server.port)
+    let scheme = if config.server.tls.enabled {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{}:{}", config.server.host, config.server.port)
 }
 
 fn resolve_key(cli: &Cli) -> Option<String> {

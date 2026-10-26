@@ -20,6 +20,22 @@ pub struct ServerConfig {
     pub max_body_bytes: usize,
     /// Maximum request processing time, in seconds.
     pub request_timeout_secs: u64,
+    /// Allowed CORS origins (e.g. ["*"] or ["https://app.example.com"]). Empty disables CORS.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
+    /// Optional TLS configuration (HTTPS)
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +88,8 @@ impl Default for ServerConfig {
             port: 7700,
             max_body_bytes: 10 * 1024 * 1024,
             request_timeout_secs: 30,
+            cors_allowed_origins: Vec::new(),
+            tls: TlsConfig::default(),
         }
     }
 }
