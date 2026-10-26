@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(status::metrics))
         .route("/status", get(status::status))
+        .route("/snapshot", post(status::snapshot))
         .route("/auth/login", post(auth::login))
         .route("/auth/rotate-key", post(auth::rotate_key))
         .route(

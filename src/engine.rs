@@ -1,9 +1,10 @@
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use crate::auth::AuthUser;
 use crate::crypto::{self, Keyring};
 use crate::error::{AppError, FieldError, RecordError};
 use crate::models::*;
@@ -1008,3 +1009,101 @@ pub async fn migrate_tables(
     }
     Ok(report)
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub destination: String,
+    pub databases_copied: usize,
+    pub tables_copied: usize,
+}
+
+pub async fn create_snapshot(
+    state: &AppState,
+    user: &AuthUser,
+    dest_dir: &std::path::Path,
+) -> Result<SnapshotResponse, AppError> {
+    user.require_admin()?;
+
+    // Acquire metadata read lock so users/roles/dbs registries don't mutate during snapshot
+    let _meta_guard = state.lock_meta_read().await;
+
+    let dest_meta = dest_dir.join("meta");
+    let dest_dbs = dest_dir.join("dbs");
+    tokio::fs::create_dir_all(&dest_meta)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create snapshot dir: {e}"))?;
+    tokio::fs::create_dir_all(&dest_dbs)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to create snapshot dir: {e}"))?;
+
+    // Copy metadata files
+    for file in &["users.json", "roles.json", "dbs.json", "master.key"] {
+        let src = state.paths.meta.join(file);
+        if src.exists() {
+            let dst = dest_meta.join(file);
+            let _ = tokio::fs::copy(&src, &dst).await;
+        }
+    }
+
+    let dbs: DbsFile = storage::read_json(&state.paths.dbs_registry()).await?;
+    let mut databases_copied = 0;
+    let mut tables_copied = 0;
+
+    for meta in &dbs.dbs {
+        let db_dir = state.paths.db_dir(&meta.name);
+        if !db_dir.exists() {
+            continue;
+        }
+        let dst_db_dir = dest_dbs.join(&meta.name);
+        tokio::fs::create_dir_all(&dst_db_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to create db snapshot dir: {e}"))?;
+        databases_copied += 1;
+
+        let mut entries = tokio::fs::read_dir(&db_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read db dir: {e}"))?;
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read entry: {e}"))?
+        {
+            let path = entry.path();
+            let is_table = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| matches!(ext, "json" | "msgpack"))
+                .unwrap_or(false);
+
+            if !is_table {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+
+            // Read lock per table ensures point-in-time consistency while copying
+            let _table_guard = state.lock_table_read(&meta.name, stem).await;
+            if let Some(file_name) = path.file_name() {
+                let dst_path = dst_db_dir.join(file_name);
+                tokio::fs::copy(&path, &dst_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to copy table: {e}"))?;
+                tables_copied += 1;
+            }
+        }
+    }
+
+    ops!("create_snapshot"; user = user.0.username, tables = tables_copied);
+
+    Ok(SnapshotResponse {
+        timestamp: chrono::Utc::now(),
+        destination: dest_dir.display().to_string(),
+        databases_copied,
+        tables_copied,
+    })
+}
+

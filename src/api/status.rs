@@ -42,3 +42,25 @@ pub async fn status(
         "dbs": dbs.dbs.len(),
     })))
 }
+
+#[derive(serde::Deserialize)]
+pub struct SnapshotParams {
+    pub destination: Option<String>,
+}
+
+pub async fn snapshot(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Option<Json<SnapshotParams>>,
+) -> Result<Json<crate::engine::SnapshotResponse>, AppError> {
+    let dest_dir = match body.and_then(|b| b.destination.clone()) {
+        Some(custom) => crate::config::expand_home(&custom),
+        None => {
+            let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+            state.paths.home.join("backups").join(format!("snapshot_{timestamp}"))
+        }
+    };
+
+    let result = crate::engine::create_snapshot(&state, &user, &dest_dir).await?;
+    Ok(Json(result))
+}

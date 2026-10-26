@@ -1,7 +1,7 @@
 use anyhow::bail;
 use clap::{Parser, Subcommand};
 use lunadb::{
-    api, bootstrap, client as http_client, config, crypto, engine, shell, state, storage,
+    api, auth, bootstrap, client as http_client, config, crypto, engine, models, shell, state, storage,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -34,6 +34,10 @@ enum Command {
         to: String,
         #[arg(long)]
         force: bool,
+    },
+    Backup {
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
     },
 }
 
@@ -101,6 +105,10 @@ fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("provide --key or set LUNADB_API_KEY to manage api keys")
             })?;
             run_apikey(base_url, key, action)
+        }
+        Command::Backup { out } => {
+            let base_url = server_override.unwrap_or_else(|| default_base_url(&config));
+            backup_command(&paths, &config, base_url, key_override, out)
         }
     }
 }
@@ -224,6 +232,56 @@ fn migrate_command(paths: &config::Paths, to: &str, force: bool) -> anyhow::Resu
     );
     for label in &report.converted {
         println!("  converted: {label}");
+    }
+    Ok(())
+}
+
+fn backup_command(
+    paths: &config::Paths,
+    config: &config::Config,
+    base_url: String,
+    key_override: Option<String>,
+    out: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let dest_dir = match out {
+        Some(dir) => dir,
+        None => {
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            paths.home.join("backups").join(format!("snapshot_{timestamp}"))
+        }
+    };
+
+    if server_running(paths) {
+        // Online backup via HTTP API
+        let key = key_override.ok_or_else(|| {
+            anyhow::anyhow!("server is running; provide --key or set LUNADB_API_KEY with admin access for online backup")
+        })?;
+        let client = http_client::Client::new(base_url, Some(key));
+        let body = serde_json::json!({
+            "destination": dest_dir.display().to_string(),
+        });
+        let res = client.post("/snapshot", body)?;
+        println!("online backup created successfully:");
+        println!("{}", serde_json::to_string_pretty(&res)?);
+    } else {
+        // Offline consistent backup
+        let keyring = std::sync::Arc::new(crypto::Keyring::load(paths, config)?);
+        let config_path = paths.home.join("config.toml");
+        let state = state::AppState::new(paths.clone(), keyring, config.clone(), config_path);
+        let dummy_admin = models::User {
+            id: "root".to_string(),
+            username: "root".to_string(),
+            password_hash: String::new(),
+            api_key_hash: None,
+            api_keys: Vec::new(),
+            role: models::ROLE_ADMIN.to_string(),
+            grants: Vec::new(),
+            created_at: chrono::Utc::now(),
+        };
+        let auth_user = auth::AuthUser(dummy_admin);
+        let report = runtime()?.block_on(engine::create_snapshot(&state, &auth_user, &dest_dir))?;
+        println!("offline backup created successfully:");
+        println!("{}", serde_json::to_string_pretty(&report)?);
     }
     Ok(())
 }

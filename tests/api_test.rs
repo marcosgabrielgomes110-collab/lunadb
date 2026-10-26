@@ -1579,3 +1579,56 @@ async fn reads_and_writes_on_distinct_tables_do_not_block_each_other() {
         assert_eq!(body["total"], json!(20));
     }
 }
+
+#[tokio::test]
+async fn test_online_snapshot() {
+    let server = TestServer::spawn().await;
+    let root = server.login_root().await;
+
+    // Create a database, table and record
+    server
+        .request(
+            "POST",
+            "/dbs",
+            Some(&root),
+            Some(json!({"name": "snap_db"})),
+        )
+        .await;
+    server
+        .request(
+            "POST",
+            "/dbs/snap_db/tables",
+            Some(&root),
+            Some(json!({"name": "items"})),
+        )
+        .await;
+    server
+        .request(
+            "POST",
+            "/dbs/snap_db/tables/items/records",
+            Some(&root),
+            Some(json!({"title": "snapshot item 1"})),
+        )
+        .await;
+
+    // Trigger online snapshot
+    let snapshot_dir = tempfile::tempdir().unwrap();
+    let dest_path = snapshot_dir.path().join("backup");
+    let (status, body) = server
+        .request(
+            "POST",
+            "/snapshot",
+            Some(&root),
+            Some(json!({"destination": dest_path.to_str().unwrap()})),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["databases_copied"], json!(1));
+    assert_eq!(body["tables_copied"], json!(1));
+
+    // Verify snapshot filesystem contents
+    assert!(dest_path.join("meta").join("users.json").exists());
+    assert!(dest_path.join("meta").join("dbs.json").exists());
+    assert!(dest_path.join("dbs").join("snap_db").exists());
+}
