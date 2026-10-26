@@ -1,9 +1,15 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="LunaDB Logo" width="220" />
+</p>
+
 # LunaDB
 
-[![CI](https://github.com/marcosgabrielgomes110-collab/lunadb/actions/workflows/ci.yml/badge.svg)](https://github.com/marcosgabrielgomes110-collab/lunadb/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.0.1-informational)](CHANGELOG.md)
+<p align="center">
+  <a href="https://github.com/marcosgabrielgomes110-collab/lunadb/actions/workflows/ci.yml"><img src="https://github.com/marcosgabrielgomes110-collab/lunadb/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-edition%202024-orange.svg" alt="Rust" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.0.1-informational" alt="Version" /></a>
+</p>
 
 LunaDB is a self-contained JSON/MessagePack document database exposed as an HTTP API.
 Each table is a single file on disk, records can be validated against an optional schema,
@@ -129,6 +135,46 @@ PYTHONPATH=lunapy/src python -m pytest lunapy/tests
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
 
+## Docker
+
+Build and run with Docker:
+
+```bash
+docker build -t lunadb .
+docker run -d --name lunadb -p 7700:7700 -v lunadb-data:/var/lib/lunadb lunadb
+```
+
+Or use Docker Compose:
+
+```bash
+docker compose up -d       # start
+docker compose logs -f     # follow logs
+docker compose down        # stop (data is preserved in the volume)
+```
+
+The container initialises config, master key, and root user on first boot. Mount
+a custom `config.toml` at `/etc/lunadb/config.toml` to override defaults.
+
+## Systemd
+
+A production-hardened service unit is provided in `contrib/lunadb.service`:
+
+```bash
+sudo useradd --system --create-home --home-dir /var/lib/lunadb lunadb
+sudo install -m 0755 target/release/lunadb /usr/local/bin/lunadb
+sudo install -d -m 0750 -o lunadb -g lunadb /etc/lunadb /var/lib/lunadb
+sudo cp contrib/lunadb.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now lunadb
+```
+
+Check status and logs:
+
+```bash
+sudo systemctl status lunadb
+journalctl -u lunadb -f
+```
+
 ## Documentation
 
 - [HTTP API](docs/api.md)
@@ -147,6 +193,9 @@ src/                 Rust library and binary (API, engine, schema, storage, cryp
 lunapy/              Python SDK
 docs/                API, CLI, and SDK documentation
 tests/               Rust integration tests
+contrib/             Deployment files (systemd service unit)
+Dockerfile           Multi-stage production container image
+docker-compose.yml   Single-container Compose deployment
 Makefile             build/test/run/install shortcuts
 ```
 

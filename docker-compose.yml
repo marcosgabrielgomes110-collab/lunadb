@@ -1,0 +1,58 @@
+# docker-compose.yml — LunaDB production deployment
+#
+# Quick start:
+#   docker compose up -d
+#
+# The container initialises config, master key, and root user on first boot
+# (via `lunadb init`, which is triggered automatically by `lunadb serve`).
+#
+# Persist your data by keeping the two volumes below. If you need a custom
+# config.toml, bind-mount it at /etc/lunadb/config.toml.
+
+services:
+  lunadb:
+    build: .
+    image: lunadb:latest
+    container_name: lunadb
+    restart: unless-stopped
+
+    ports:
+      - "7700:7700"
+
+    volumes:
+      # Persistent data (tables, master key, users, roles, logs).
+      - lunadb-data:/var/lib/lunadb
+      # Optional: mount a custom config from the host.
+      # - ./config.toml:/etc/lunadb/config.toml:ro
+
+    environment:
+      # Override the root password on first init.  After the first start
+      # the password is hashed and this variable is ignored.
+      # LUNADB_ROOT_PASSWORD: "a-strong-random-password"
+
+      # Provide the master encryption key via env instead of a file.
+      # LUNADB_MASTER_KEY: ""
+
+      # RUST_LOG: "lunadb=info"
+      RUST_BACKTRACE: "0"
+
+    # Resource limits — adjust to your workload.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+
+    healthcheck:
+      test: ["CMD", "lunadb", "shell", "--server", "http://127.0.0.1:7700", "--eval", "health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  lunadb-data:
+    driver: local

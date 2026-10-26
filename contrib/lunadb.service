@@ -1,0 +1,69 @@
+[Unit]
+Description=LunaDB — JSON/MessagePack document database
+Documentation=https://github.com/marcosgabrielgomes110-collab/lunadb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lunadb
+Group=lunadb
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+# Adjust if you installed lunadb elsewhere or use a different data directory.
+ExecStart=/usr/local/bin/lunadb serve --config /etc/lunadb/config.toml
+WorkingDirectory=/var/lib/lunadb
+
+# Storage and config directories created on install (see ExecStartPre).
+ExecStartPre=+/usr/bin/install -d -m 0750 -o lunadb -g lunadb /var/lib/lunadb
+ExecStartPre=+/usr/bin/install -d -m 0750 -o lunadb -g lunadb /etc/lunadb
+
+# ── Environment ────────────────────────────────────────────────────────────────
+Environment=RUST_BACKTRACE=0
+# Provide master key via env if you prefer it over the key file:
+# Environment=LUNADB_MASTER_KEY=
+# Or use an EnvironmentFile for secrets:
+# EnvironmentFile=/etc/lunadb/env
+
+# ── Restart policy ─────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# ── Security hardening ─────────────────────────────────────────────────────────
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Allow writes only to data, config, logs, and tmp.
+ReadWritePaths=/var/lib/lunadb /etc/lunadb
+
+# ── Resource limits ────────────────────────────────────────────────────────────
+# Adjust based on expected workload.
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lunadb
+
+[Install]
+WantedBy=multi-user.target
