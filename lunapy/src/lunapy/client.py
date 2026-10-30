@@ -17,17 +17,20 @@ from .models import (
     Grant,
     Level,
     QueryResult,
+    Record,
     RecordPage,
     Role,
     Sort,
     TableSchema,
     User,
 )
+from .resources import Database, Table
 
 DEFAULT_URL = "http://127.0.0.1:7700"
 DEFAULT_CONFIG_PATH = "~/.lunadb/config.toml"
 
 GrantLike = Union[Grant, Mapping[str, str], tuple[str, str], list[str]]
+SortLike = Union[Sort, Mapping[str, str], tuple[str, str], str]
 
 
 def _normalize_grants(grants: Iterable[GrantLike]) -> list[dict[str, str]]:
@@ -50,11 +53,10 @@ def _unique_key(key: Union[str, Sequence[str]]) -> Union[str, list[str]]:
 
 
 def _normalize_schema(schema: Union[TableSchema, Mapping[str, Any]]) -> dict[str, Any]:
-    if isinstance(schema, TableSchema):
-        return schema.to_dict()
-    if isinstance(schema, Mapping):
-        return dict(schema)
-    raise LunaError("schema must be a TableSchema or dict")
+    try:
+        return TableSchema.from_value(schema).to_dict()
+    except TypeError as err:
+        raise LunaError(str(err)) from None
 
 
 def _normalize_aggregate(
@@ -72,7 +74,7 @@ def _normalize_aggregate(
     return spec_dict
 
 
-def _normalize_sort(item: Union[Sort, Mapping[str, str], tuple[str, str], str]) -> dict[str, str]:
+def _normalize_sort(item: SortLike) -> dict[str, str]:
     if isinstance(item, Sort):
         return item.to_dict()
     if isinstance(item, Mapping):
@@ -83,6 +85,33 @@ def _normalize_sort(item: Union[Sort, Mapping[str, str], tuple[str, str], str]) 
         return Sort(field=item).to_dict()
     field, direction = item
     return Sort(field=field, dir=direction).to_dict()
+
+
+def _normalize_sorts(sort: Any) -> list[dict[str, str]] | None:
+    if sort is None:
+        return None
+    if isinstance(sort, (str, Sort, Mapping)):
+        sort = [sort]
+    elif (
+        isinstance(sort, tuple)
+        and len(sort) == 2
+        and all(isinstance(item, str) for item in sort)
+    ):
+        # a single ("field", "dir") pair, not a list of two fields
+        sort = [sort]
+    return [_normalize_sort(item) for item in sort]
+
+
+def _merge_record(
+    record: Optional[Mapping[str, Any]], fields: Mapping[str, Any]
+) -> dict[str, Any]:
+    if record is None:
+        return dict(fields)
+    if not isinstance(record, Mapping):
+        raise LunaError("record must be a mapping")
+    merged = dict(record)
+    merged.update(fields)
+    return merged
 
 
 def _extract_payload(err: urllib.error.HTTPError) -> dict[str, Any]:
@@ -108,11 +137,50 @@ class LunaClient:
         self.api_key = api_key or os.environ.get("LUNADB_API_KEY")
         self.timeout = timeout
 
+    def __repr__(self) -> str:
+        return (
+            f"LunaClient(base_url={self.base_url!r}, "
+            f"authenticated={bool(self.api_key)})"
+        )
+
+    def __enter__(self) -> LunaClient:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Closes the client. Kept for symmetry with context-manager usage.
+
+        The stdlib HTTP transport does not keep connections around, so there is
+        nothing to release today.
+        """
+
+    @classmethod
+    def connect(
+        cls,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        *,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> LunaClient:
+        """Creates a client and, optionally, logs in in one step.
+
+        >>> client = LunaClient.connect(username="root", password="changeme")
+        """
+        client = cls(base_url=base_url, api_key=api_key, timeout=timeout)
+        if username is not None:
+            client.login(username, password or "")
+        return client
+
     @classmethod
     def from_config(
         cls,
         path: Optional[Union[str, Path]] = None,
         api_key: Optional[str] = None,
+        timeout: float = 30.0,
     ) -> LunaClient:
         config_path = Path(
             path or os.environ.get("LUNADB_CONFIG") or DEFAULT_CONFIG_PATH
@@ -124,7 +192,22 @@ class LunaClient:
         server = data.get("server", {})
         host = server.get("host", "127.0.0.1")
         port = server.get("port", 7700)
-        return cls(base_url=f"http://{host}:{port}", api_key=api_key)
+        return cls(
+            base_url=f"http://{host}:{port}", api_key=api_key, timeout=timeout
+        )
+
+    def db(self, name: str) -> Database:
+        """Returns a handle bound to a database: ``client.db("app")``."""
+        return Database(self, name)
+
+    database = db
+
+    def table(self, db: str, table: str) -> Table:
+        """Returns a handle bound to a table: ``client.table("app", "users")``."""
+        return Table(self, db, table)
+
+    def __getitem__(self, db: str) -> Database:
+        return self.db(db)
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health", auth=False)
@@ -339,12 +422,18 @@ class LunaClient:
         )
 
     def validate_record(
-        self, db: str, table: str, record: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records/validate",
-            body=dict(record),
+        self,
+        db: str,
+        table: str,
+        record: Optional[Mapping[str, Any]] = None,
+        **fields: Any,
+    ) -> Record:
+        return Record.from_dict(
+            self._request(
+                "POST",
+                f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records/validate",
+                body=_merge_record(record, fields),
+            )
         )
 
     def _schema_path(self, db: str, table: str) -> str:
@@ -360,7 +449,7 @@ class LunaClient:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         cursor: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Record]:
         return list(self.list_records_page(db, table, limit, offset, cursor).records)
 
     def list_records_page(
@@ -379,20 +468,31 @@ class LunaClient:
         return RecordPage.from_dict(data)
 
     def create_record(
-        self, db: str, table: str, record: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records",
-            body=dict(record),
+        self,
+        db: str,
+        table: str,
+        record: Optional[Mapping[str, Any]] = None,
+        **fields: Any,
+    ) -> Record:
+        """Creates a record, either from a dict or from keyword arguments.
+
+        >>> client.create_record("app", "users", {"name": "Ana"})
+        >>> client.create_record("app", "users", name="Ana")
+        """
+        return Record.from_dict(
+            self._request(
+                "POST",
+                f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records",
+                body=_merge_record(record, fields),
+            )
         )
 
-    def get_record(
-        self, db: str, table: str, record_id: str
-    ) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            self._record_path(db, table, record_id),
+    def get_record(self, db: str, table: str, record_id: str) -> Record:
+        return Record.from_dict(
+            self._request(
+                "GET",
+                self._record_path(db, table, record_id),
+            )
         )
 
     def replace_record(
@@ -400,12 +500,15 @@ class LunaClient:
         db: str,
         table: str,
         record_id: str,
-        record: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return self._request(
-            "PUT",
-            self._record_path(db, table, record_id),
-            body=dict(record),
+        record: Optional[Mapping[str, Any]] = None,
+        **fields: Any,
+    ) -> Record:
+        return Record.from_dict(
+            self._request(
+                "PUT",
+                self._record_path(db, table, record_id),
+                body=_merge_record(record, fields),
+            )
         )
 
     def patch_record(
@@ -413,32 +516,49 @@ class LunaClient:
         db: str,
         table: str,
         record_id: str,
-        patch: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return self._request(
-            "PATCH",
-            self._record_path(db, table, record_id),
-            body=dict(patch),
+        patch: Optional[Mapping[str, Any]] = None,
+        **fields: Any,
+    ) -> Record:
+        return Record.from_dict(
+            self._request(
+                "PATCH",
+                self._record_path(db, table, record_id),
+                body=_merge_record(patch, fields),
+            )
         )
+
+    update_record = patch_record
 
     def aggregate(
         self,
         db: str,
         table: str,
         *,
-        aggregates: Mapping[str, Union[str, Mapping[str, Any]]],
-        group_by: Optional[Iterable[str]] = None,
+        aggregates: Optional[Mapping[str, Union[str, Mapping[str, Any]]]] = None,
+        group_by: Optional[Union[str, Iterable[str]]] = None,
         filter: Optional[Mapping[str, Any]] = None,
         limit: Optional[int] = None,
-    ) -> list[dict[str, Any]]:
+        **specs: Union[str, Mapping[str, Any]],
+    ) -> list[Record]:
+        """Groups and aggregates records.
+
+        Accepts a mapping or keyword arguments:
+
+        >>> client.aggregate("app", "sales", group_by="city", n="count", total="sum:value")
+        """
+        merged = dict(aggregates or {})
+        merged.update(specs)
+        if not merged:
+            raise LunaError("at least one aggregate is required")
         body: dict[str, Any] = {
             "aggregates": {
-                name: _normalize_aggregate(spec)
-                for name, spec in aggregates.items()
+                name: _normalize_aggregate(spec) for name, spec in merged.items()
             }
         }
         if group_by is not None:
-            body["group_by"] = list(group_by)
+            body["group_by"] = (
+                [group_by] if isinstance(group_by, str) else list(group_by)
+            )
         if filter is not None:
             body["filter"] = dict(filter)
         if limit is not None:
@@ -448,7 +568,7 @@ class LunaClient:
             f"/dbs/{urllib.parse.quote(db)}/tables/{urllib.parse.quote(table)}/records/aggregate",
             body=body,
         )
-        return list(data["groups"])
+        return [Record.from_dict(group) for group in data["groups"]]
 
     def set_password(
         self,
@@ -472,8 +592,8 @@ class LunaClient:
         table: str,
         *,
         filter: Optional[Mapping[str, Any]] = None,
-        sort: Optional[Iterable[Union[Sort, Mapping[str, str], tuple[str, str], str]]] = None,
-        fields: Optional[Iterable[str]] = None,
+        sort: Optional[Union[SortLike, Iterable[SortLike]]] = None,
+        fields: Optional[Union[str, Iterable[str]]] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         cursor: Optional[str] = None,
@@ -482,9 +602,11 @@ class LunaClient:
         if filter is not None:
             body["filter"] = dict(filter)
         if sort is not None:
-            body["sort"] = [_normalize_sort(item) for item in sort]
+            body["sort"] = _normalize_sorts(sort)
         if fields is not None:
-            body["fields"] = list(fields)
+            body["fields"] = (
+                [fields] if isinstance(fields, str) else list(fields)
+            )
         if limit is not None:
             body["limit"] = limit
         if offset is not None:
@@ -498,6 +620,25 @@ class LunaClient:
         )
         return QueryResult.from_dict(data)
 
+    def count(
+        self,
+        db: str,
+        table: str,
+        filter: Optional[Mapping[str, Any]] = None,
+    ) -> int:
+        """Returns how many records match ``filter`` (all records by default)."""
+        return self.query(db, table, filter=filter, limit=0).total
+
+    def exists(self, db: str, table: str, record_id: str) -> bool:
+        """Returns ``True`` when the record exists, ``False`` on 404."""
+        try:
+            self.get_record(db, table, record_id)
+        except LunaError as err:
+            if getattr(err, "status", None) == 404:
+                return False
+            raise
+        return True
+
     def iter_records(
         self,
         db: str,
@@ -505,7 +646,7 @@ class LunaClient:
         page_size: int = 100,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[Record]:
         """Walks every record of `table` with keyset pagination.
 
         Stable under concurrent inserts and deletes, unlike offset paging.
@@ -541,9 +682,9 @@ class LunaClient:
         page_size: int = 100,
         limit: Optional[int] = None,
         filter: Optional[Mapping[str, Any]] = None,
-        sort: Optional[Iterable[Union[Sort, Mapping[str, str], tuple[str, str], str]]] = None,
-        fields: Optional[Iterable[str]] = None,
-    ) -> Iterator[dict[str, Any]]:
+        sort: Optional[Union[SortLike, Iterable[SortLike]]] = None,
+        fields: Optional[Union[str, Iterable[str]]] = None,
+    ) -> Iterator[Record]:
         """Walks every record matching a query, one keyset page at a time."""
         cursor: Optional[str] = None
         yielded = 0
@@ -617,3 +758,21 @@ class LunaClient:
         if not raw:
             return None
         return json.loads(raw)
+
+
+def connect(
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    *,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    timeout: float = 30.0,
+) -> LunaClient:
+    """Shortcut for ``LunaClient.connect(...)``: ``connect("http://...", ...)``."""
+    return LunaClient.connect(
+        base_url=base_url,
+        api_key=api_key,
+        username=username,
+        password=password,
+        timeout=timeout,
+    )

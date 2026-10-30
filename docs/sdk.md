@@ -29,7 +29,83 @@ user = client.login("root", "changeme")
 print(user.username, user.role)
 ```
 
-All methods raise typed exceptions (see the Errors section).
+`connect()` creates the client and logs in in one step; clients also work as
+context managers. All methods raise typed exceptions (see the Errors section).
+
+```python
+from lunapy import connect
+
+with connect(base_url="http://127.0.0.1:7700", username="root", password="changeme") as client:
+    print(client.me().username)
+```
+
+## Handles (less repetition)
+
+`client.db()` and `client.table()` return lightweight handles that remember the
+database/table name. Every low-level method still exists and behaves the same.
+
+```python
+app = client.db("app")             # or client["app"]
+users = app.create_table("users")  # -> Table handle
+users = app["users"]               # handle to an existing table
+
+users.create(name="Ana", age=30)   # kwargs become record fields
+record = users.first(name="Ana")   # -> Record
+print(record.name, record["age"])
+
+users.update(record["_id"], age=31)        # partial update
+users.replace(record["_id"], name="Ana", age=32)
+users.delete(record["_id"])
+
+for person in users:                        # keyset pagination under the hood
+    print(person.name)
+
+len(users)                # users.count()
+record["_id"] in users    # existence check
+users[record["_id"]]      # users.get(id)
+```
+
+`Record` is a `dict` subclass, so `record["name"]` keeps working; attribute access
+is a shortcut (`record.name`). Dict methods win on name clashes, so use
+`record["items"]` for a field literally called `items`.
+
+### Chainable queries
+
+```python
+for user in users.where(age__gte=18).sort("-age").select("name", "age").limit(50):
+    print(user.name)
+
+users.where(tags__contains="vip").count()
+users.where(city="SP").first()       # -> Record | None
+users.where(age__gte=18).ids()       # -> list of _id
+users.where(age__gte=18).one()       # raises LunaNotFoundError when empty
+```
+
+Keyword operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `nin`, `contains`,
+`startswith`, `ends_with`, `regex`, `exists`. Use an explicit `filter={...}` for
+`$and`/`$or`/`$not` or dotted field names (`"address.city"`).
+
+### Schema shortcuts
+
+```python
+schema = TableSchema.of(
+    email=Field.string(required=True, unique=True, pattern=r".+@.+\..+"),
+    age=Field.int(min=0),
+    active=Field.bool(default=True),
+    tags=Field.array(items="string"),
+)
+users.set_schema(schema, force=True)
+
+users.add_fields({"nickname": "string"})
+users.update_field("nickname", {"required": True}, force=True)
+users.add_unique("nickname", force=True)
+users.remove_unique("nickname", force=True)
+users.remove_fields("nickname")
+```
+
+`Field` accepts either a `FieldType` or its string (`Field("bool")`), and
+`TableSchema` accepts strings/raw dicts as field definitions. A single unique key
+does not need nesting: `TableSchema(unique="email")`.
 
 ## Methods
 
@@ -39,9 +115,12 @@ All methods raise typed exceptions (see the Errors section).
 |---|---|
 | `health()` | `dict` |
 | `login(username, password)` | `User` (writes `client.api_key`) |
+| `connect(...)` (classmethod/module function) | `LunaClient` (optional login) |
 | `rotate_key()` | `str` (new key) |
 | `me()` | `User` |
 | `status()` | `dict` (admin) |
+| `db(name)` / `database(name)` | `Database` handle |
+| `table(db, table)` | `Table` handle |
 
 ### API keys
 
@@ -130,12 +209,16 @@ in `create_table`/`set_schema`.
 
 ```python
 record = client.create_record("app", "users", {"email": "a@x.com", "password": "secret1"})
+record = client.create_record("app", "users", email="a@x.com", password="secret1")  # kwargs
 client.get_record("app", "users", record["_id"])
 client.replace_record("app", "users", record["_id"], {"email": "b@x.com", "password": "another123"})
-client.patch_record("app", "users", record["_id"], {"age": 31, "tel": None})  # -> dict (partial merge)
-client.list_records("app", "users", limit=10, offset=0)   # -> list[dict]
+client.patch_record("app", "users", record["_id"], {"age": 31, "tel": None})  # -> Record (partial merge)
+client.update_record("app", "users", record["_id"], age=32)                    # alias + kwargs
+client.list_records("app", "users", limit=10, offset=0)   # -> list[Record]
+client.count("app", "users")                              # -> int
+client.exists("app", "users", record["_id"])              # -> bool
 client.delete_record("app", "users", record["_id"])
-client.validate_record("app", "users", {"email": "c@x.com"})  # -> dict (dry-run)
+client.validate_record("app", "users", {"email": "c@x.com"})  # -> Record (dry-run)
 ```
 
 ### Cursor pagination
@@ -222,14 +305,19 @@ Operators and semantics: see `docs/api.md` (Query and Aggregations sections).
 | `AutoField` (str Enum) | `CREATED_AT`, `UPDATED_AT` |
 | `Field` | `type`, `required`, `nullable`, `default`, `encrypted`, `unique`, `min`, `max`, `min_length`, `max_length`, `pattern`, `enum`, `items`, `fields`, `auto` |
 | `TableSchema` | `fields`, `strict`, `unique` |
-| `Sort` | `field`, `dir` (`"asc"`/`"desc"`) |
-| `QueryResult` | `total`, `count`, `records` |
+| `Sort` | `field`, `dir` (`"asc"`/`"desc"`); `Sort.asc()`/`Sort.desc()` |
+| `Record` (`dict` subclass) | dynamic; `record.field`, `record["field"]`, `to_dict()` |
+| `Page` | `total`, `count`, `records`, `next_cursor`, `first` |
+| `QueryResult` / `RecordPage` | `Page` subclasses used by `query()` / `list_records_page()` |
 | `User` | `id`, `username`, `role`, `grants`, `created_at` |
 | `Role` | `name`, `description`, `builtin`, `permissions` |
 | `DbMeta` | `name`, `owner_id`, `created_at` |
 | `ApiKey` | `id`, `name`, `prefix`, `created_at`, `last_used_at`, `revoked` |
 
-All are immutable dataclasses (`frozen=True`) with `from_dict` (and `to_dict` on `Grant`, `Field`, `TableSchema`, `Sort`).
+All are immutable dataclasses (`frozen=True`) with `from_dict` (and `to_dict` on
+`Grant`, `Field`, `TableSchema`, `Sort`). `Field` also offers typed shortcuts:
+`Field.string(...)`, `Field.int(...)`, `Field.bool(...)`, `Field.array(...)`,
+`Field.datetime(...)`, among others.
 
 ## Errors (`lunapy.errors`)
 
@@ -267,4 +355,5 @@ python -m pytest lunapy/tests
 
 The tests start the real server on a temporary port and storage (session fixture) and
 cover auth, CRUD, schema/unique, encryption at rest, migration, queries, permissions,
-API keys, and the `lunadb apikey ...` commands.
+API keys, the `lunadb apikey ...` commands, and the Pythonic shortcuts (handles,
+`Record`, query builder, and abbreviated schemas).

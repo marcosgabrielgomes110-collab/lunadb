@@ -23,6 +23,11 @@ All notable changes to this project are documented in this file. The format is b
   (with a Portuguese version), now including a capacity and known-limitations section.
 - CI: a dependency audit job (`cargo audit` and `pip-audit`) that fails on known
   vulnerabilities.
+- Python SDK ergonomics, without breaking the existing API: `client.db()`/`client.table()`
+  handles, chainable `where()`/`sort()`/`select()` queries, `connect()` and context-manager
+  support, record creation/update with keyword arguments, `Record` dicts with attribute access,
+  `Field.string()`/`Field.int()` shortcuts, and lenient schema inputs (`TableSchema(unique="email")`,
+  string field definitions).
 
 ### Changed
 

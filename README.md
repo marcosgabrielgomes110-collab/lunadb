@@ -95,11 +95,16 @@ pip install -e "lunapy[dev]"   # with pytest
 ```
 
 ```python
-from lunapy import LunaClient
+from lunapy import connect
 
-client = LunaClient(base_url="http://127.0.0.1:7700", api_key="luna_...")
-client.login("root", "changeme")
+client = connect(base_url="http://127.0.0.1:7700", username="root", password="changeme")
 client.create_db("app")
+
+notes = client.db("app").create_table("notes")  # Table handle
+notes.create(title="hello")                     # kwargs become record fields
+print(notes.where(title__contains="hell").count())
+
+# the low-level API keeps working
 client.create_record("app", "notes", {"title": "hello"})
 ```
 

@@ -1,4 +1,4 @@
-from .client import LunaClient
+from .client import LunaClient, connect
 from .errors import (
     LunaAuthError,
     LunaBadRequestError,
@@ -20,18 +20,25 @@ from .models import (
     FieldType,
     Grant,
     Level,
+    Page,
     QueryResult,
+    Record,
     RecordPage,
     Role,
     Sort,
     TableSchema,
     User,
 )
+from .resources import Database, QueryBuilder, Table
 
 __version__ = "0.0.1"
 
 __all__ = [
     "LunaClient",
+    "connect",
+    "Database",
+    "Table",
+    "QueryBuilder",
     "LunaError",
     "LunaConnectionError",
     "LunaHTTPError",
@@ -50,7 +57,9 @@ __all__ = [
     "FieldType",
     "Grant",
     "Level",
+    "Page",
     "QueryResult",
+    "Record",
     "RecordPage",
     "Role",
     "Sort",

@@ -1,8 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Iterator, Mapping, Self, Sequence
+
+__all__ = [
+    "ApiKey",
+    "AutoField",
+    "DbMeta",
+    "Field",
+    "FieldType",
+    "Grant",
+    "Level",
+    "Page",
+    "QueryResult",
+    "Record",
+    "RecordPage",
+    "Role",
+    "Sort",
+    "TableSchema",
+    "User",
+]
 
 
 class Level(str, Enum):
@@ -29,13 +47,78 @@ class AutoField(str, Enum):
     UPDATED_AT = "updated_at"
 
 
+def _wrap(value: Any) -> Any:
+    """Turns JSON objects into Records, recursively."""
+    if isinstance(value, Record):
+        return value
+    if isinstance(value, Mapping):
+        return Record.from_dict(value)
+    if isinstance(value, list):
+        return [_wrap(item) for item in value]
+    return value
+
+
+def _unwrap(value: Any) -> Any:
+    """Turns Records back into plain JSON-compatible data, recursively."""
+    if isinstance(value, Mapping):
+        return {key: _unwrap(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_unwrap(item) for item in value]
+    if isinstance(value, tuple):
+        return [_unwrap(item) for item in value]
+    return value
+
+
+class Record(dict):
+    """A record returned by the API.
+
+    Behaves exactly like a ``dict`` (``record["name"]``), but also supports
+    attribute access (``record.name``) and conversion back to plain data.
+
+    >>> record = Record.from_dict({"name": "Ana", "address": {"city": "SP"}})
+    >>> record.name
+    'Ana'
+    >>> record.address.city
+    'SP'
+    >>> record.to_dict()
+    {'name': 'Ana', 'address': {'city': 'SP'}}
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(
+                f"record has no field {name!r}"
+            ) from None
+
+    def __dir__(self) -> list[str]:
+        return sorted({*super().__dir__(), *self.keys()})
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Record:
+        if isinstance(data, Record):
+            return data
+        return cls({key: _wrap(value) for key, value in data.items()})
+
+    def to_dict(self) -> dict[str, Any]:
+        """Returns a plain, JSON-serializable ``dict`` (deep copy)."""
+        return {key: _unwrap(value) for key, value in self.items()}
+
+
 @dataclass(frozen=True)
 class Grant:
     db: str
     level: Level
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.level, Level):
+            object.__setattr__(self, "level", Level(self.level))
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Grant:
+    def from_dict(cls, data: Mapping[str, Any]) -> Grant:
         return cls(db=data["db"], level=Level(data["level"]))
 
     def to_dict(self) -> dict[str, str]:
@@ -60,8 +143,40 @@ class Field:
     fields: dict[str, Field] | None = None
     auto: AutoField | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.type, FieldType):
+            object.__setattr__(self, "type", FieldType(self.type))
+        if self.auto is not None and not isinstance(self.auto, AutoField):
+            object.__setattr__(self, "auto", AutoField(self.auto))
+        if self.items is not None and not isinstance(self.items, Field):
+            object.__setattr__(self, "items", Field.from_value(self.items))
+        if self.fields is not None:
+            object.__setattr__(
+                self,
+                "fields",
+                {
+                    name: Field.from_value(item)
+                    for name, item in self.fields.items()
+                },
+            )
+        if self.enum is not None and not isinstance(self.enum, tuple):
+            if isinstance(self.enum, str) or not hasattr(self.enum, "__iter__"):
+                values = (self.enum,)
+            else:
+                values = tuple(self.enum)
+            object.__setattr__(self, "enum", values)
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Field:
+    def from_value(cls, value: Field | str | Mapping[str, Any]) -> Field:
+        """Accepts a ``Field``, a ``FieldType``/``str`` or a raw schema dict."""
+        if isinstance(value, Field):
+            return value
+        if isinstance(value, Mapping):
+            return cls.from_dict(dict(value))
+        return cls(value)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Field:
         return cls(
             type=FieldType(data["type"]),
             required=bool(data.get("required", False)),
@@ -110,37 +225,119 @@ class Field:
             out["auto"] = self.auto.value
         return out
 
+    # Readable shortcuts: Field.string(required=True), Field.int(min=0), ...
+    @classmethod
+    def string(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.STRING, **kwargs)
+
+    str = string
+
+    @classmethod
+    def int(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.INT, **kwargs)
+
+    integer = int
+
+    @classmethod
+    def float(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.FLOAT, **kwargs)
+
+    @classmethod
+    def bool(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.BOOL, **kwargs)
+
+    boolean = bool
+
+    @classmethod
+    def datetime(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.DATETIME, **kwargs)
+
+    @classmethod
+    def date(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.DATE, **kwargs)
+
+    @classmethod
+    def uuid(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.UUID, **kwargs)
+
+    @classmethod
+    def object(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.OBJECT, **kwargs)
+
+    @classmethod
+    def array(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.ARRAY, **kwargs)
+
+    @classmethod
+    def any(cls, **kwargs: Any) -> Field:
+        return cls(FieldType.ANY, **kwargs)
+
 
 @dataclass(frozen=True)
 class TableSchema:
-    fields: dict[str, Field]
+    fields: Mapping[str, Field | str | Mapping[str, Any]] = field(
+        default_factory=dict
+    )
     strict: bool = False
-    unique: tuple[tuple[str, ...], ...] = ()
+    unique: (
+        str
+        | Sequence[str]
+        | Sequence[Sequence[str]]
+        | None
+    ) = ()
 
     def __post_init__(self) -> None:
-        normalized: list[tuple[str, ...]] = []
-        for key in self.unique:
-            if isinstance(key, str):
-                normalized.append((key,))
-            else:
-                normalized.append(tuple(key))
+        object.__setattr__(
+            self,
+            "fields",
+            {
+                name: Field.from_value(item)
+                for name, item in self.fields.items()
+            },
+        )
+        if self.unique is None:
+            normalized: list[tuple[str, ...]] = []
+        elif isinstance(self.unique, str):
+            normalized = [(self.unique,)]
+        else:
+            normalized = []
+            for key in self.unique:
+                normalized.append((key,) if isinstance(key, str) else tuple(key))
         object.__setattr__(self, "unique", tuple(normalized))
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TableSchema:
-        unique: list[tuple[str, ...]] = []
-        for item in data.get("unique") or []:
-            if isinstance(item, str):
-                unique.append((item,))
-            else:
-                unique.append(tuple(item))
+    def from_value(cls, value: TableSchema | Mapping[str, Any]) -> TableSchema:
+        if isinstance(value, TableSchema):
+            return value
+        if isinstance(value, Mapping):
+            return cls.from_dict(dict(value))
+        raise TypeError("schema must be a TableSchema or a dict")
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        strict: bool = False,
+        unique: str | Sequence[str] | Sequence[Sequence[str]] | None = (),
+        **fields: Field | str | Mapping[str, Any],
+    ) -> TableSchema:
+        """Builds a schema from keyword arguments.
+
+        >>> TableSchema.of(
+        ...     email=Field.string(required=True, unique=True),
+        ...     age=Field.int(min=0),
+        ... )
+        """
+        return cls(fields=fields, strict=strict, unique=unique)
+
+    from_fields = of
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> TableSchema:
         return cls(
-            fields={
-                name: Field.from_dict(item)
-                for name, item in (data.get("fields") or {}).items()
-            },
+            fields=dict(data.get("fields") or {}),
             strict=bool(data.get("strict", False)),
-            unique=tuple(unique),
+            unique=data.get("unique") or (),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -151,14 +348,24 @@ class TableSchema:
         if self.unique:
             keys: list[Any] = []
             for key in self.unique:
-                if isinstance(key, str):
-                    keys.append(key)
-                elif len(key) == 1:
+                if len(key) == 1:
                     keys.append(key[0])
                 else:
                     keys.append(list(key))
             output["unique"] = keys
         return output
+
+    def __getitem__(self, name: str) -> Field:
+        return self.fields[name]
+
+    def __contains__(self, name: object) -> bool:
+        return name in self.fields
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.fields)
+
+    def __len__(self) -> int:
+        return len(self.fields)
 
 
 @dataclass(frozen=True)
@@ -166,8 +373,22 @@ class Sort:
     field: str
     dir: str = "asc"
 
+    def __post_init__(self) -> None:
+        direction = str(self.dir).lower()
+        if direction not in ("asc", "desc"):
+            raise ValueError("sort direction must be 'asc' or 'desc'")
+        object.__setattr__(self, "dir", direction)
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Sort:
+    def asc(cls, field: str) -> Sort:
+        return cls(field=field, dir="asc")
+
+    @classmethod
+    def desc(cls, field: str) -> Sort:
+        return cls(field=field, dir="desc")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Sort:
         return cls(field=data["field"], dir=data.get("dir", "asc"))
 
     def to_dict(self) -> dict[str, str]:
@@ -175,41 +396,50 @@ class Sort:
 
 
 @dataclass(frozen=True)
-class QueryResult:
+class Page:
+    """A page of records, with the cursor that leads to the next one."""
+
     total: int
     count: int
-    records: tuple[dict[str, Any], ...]
+    records: tuple[Record, ...]
     next_cursor: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> QueryResult:
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
         records = data.get("records") or []
         return cls(
             total=int(data.get("total", len(records))),
             count=int(data.get("count", len(records))),
-            records=tuple(records),
+            records=tuple(Record.from_dict(item) for item in records),
             next_cursor=data.get("next_cursor"),
         )
+
+    @property
+    def first(self) -> Record | None:
+        """The first record of the page, or ``None`` when it is empty."""
+        return self.records[0] if self.records else None
+
+    def __iter__(self) -> Iterator[Record]:
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int) -> Record:
+        return self.records[index]
+
+    def __bool__(self) -> bool:
+        return bool(self.records)
 
 
 @dataclass(frozen=True)
-class RecordPage:
+class QueryResult(Page):
+    """Result of ``query()``: filtered total plus the records of this page."""
+
+
+@dataclass(frozen=True)
+class RecordPage(Page):
     """A page of records from the list endpoint."""
-
-    total: int
-    count: int
-    records: tuple[dict[str, Any], ...]
-    next_cursor: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> RecordPage:
-        records = data.get("records") or []
-        return cls(
-            total=int(data.get("total", len(records))),
-            count=int(data.get("count", len(records))),
-            records=tuple(records),
-            next_cursor=data.get("next_cursor"),
-        )
 
 
 @dataclass(frozen=True)
@@ -222,7 +452,7 @@ class ApiKey:
     revoked: bool
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ApiKey:
+    def from_dict(cls, data: Mapping[str, Any]) -> ApiKey:
         return cls(
             id=data["id"],
             name=data["name"],
@@ -242,7 +472,7 @@ class User:
     created_at: str
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> User:
+    def from_dict(cls, data: Mapping[str, Any]) -> User:
         return cls(
             id=data["id"],
             username=data["username"],
@@ -250,6 +480,9 @@ class User:
             grants=tuple(Grant.from_dict(item) for item in data.get("grants", [])),
             created_at=data["created_at"],
         )
+
+    def __str__(self) -> str:
+        return self.username
 
 
 @dataclass(frozen=True)
@@ -260,7 +493,7 @@ class Role:
     permissions: tuple[Grant, ...]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Role:
+    def from_dict(cls, data: Mapping[str, Any]) -> Role:
         return cls(
             name=data["name"],
             description=data.get("description", ""),
@@ -278,7 +511,7 @@ class DbMeta:
     created_at: str
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> DbMeta:
+    def from_dict(cls, data: Mapping[str, Any]) -> DbMeta:
         return cls(
             name=data["name"],
             owner_id=data["owner_id"],
