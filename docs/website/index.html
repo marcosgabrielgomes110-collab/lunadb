@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentação · LunaDB</title>
+<meta name="description" content="Documentação do LunaDB: setup, API HTTP, CLI e shell, SDK Python e operação.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Controle das abas: CSS puro, sem JavaScript.
+     As abas respondem a setas do teclado (comportamento nativo de radio group). -->
+<input type="radio" name="tab" id="t-setup" checked>
+<input type="radio" name="tab" id="t-api">
+<input type="radio" name="tab" id="t-cli">
+<input type="radio" name="tab" id="t-sdk">
+<input type="radio" name="tab" id="t-ops">
+
+<header class="topbar">
+  <a class="brand" href="#page-top">
+    <img src="assets/logo.png" alt="Logotipo do LunaDB" width="26" height="26">
+    <span class="brand-name">LunaDB</span>
+    <span class="brand-ver">0.0.1</span>
+  </a>
+  <nav class="tabs" aria-label="Seções da documentação">
+    <label class="tab" for="t-setup">Setup</label>
+    <label class="tab" for="t-api">API HTTP</label>
+    <label class="tab" for="t-cli">CLI &amp; shell</label>
+    <label class="tab" for="t-sdk">SDK Python</label>
+    <label class="tab" for="t-ops">Operação</label>
+  </nav>
+</header>
+
+<main id="page-top">
+
+<!-- ============================================================ SETUP -->
+<section class="panel" id="p-setup">
+  <header class="page-head">
+    <h1>Setup</h1>
+    <p class="lede">LunaDB é um banco de documentos JSON/MessagePack autocontido, exposto como API
+    HTTP. Cada tabela é um arquivo em disco, registros podem ser validados por um schema opcional,
+    campos sensíveis são cifrados em repouso e o acesso é controlado por roles, grants por banco
+    e API keys.</p>
+    <nav class="jump" aria-label="Nesta página">
+      <a href="#s-requisitos">Requisitos</a>
+      <a href="#s-primeiro-acesso">Primeiro acesso</a>
+      <a href="#s-config">Configuração</a>
+      <a href="#s-auth">Autenticação</a>
+      <a href="#s-docker">Docker</a>
+      <a href="#s-next">Próximos passos</a>
+    </nav>
+  </header>
+
+  <h2 id="s-requisitos">Requisitos</h2>
+  <dl class="specs">
+    <div><dt>Rust 1.85+</dt><dd>para compilar o servidor (edition 2024)</dd></div>
+    <div><dt>Python 3.11+</dt><dd>apenas para o SDK <code>lunapy</code></dd></div>
+    <div><dt>Sistema</dt><dd>Linux, macOS ou Windows</dd></div>
+  </dl>
+
+  <h2 id="s-primeiro-acesso">Primeiro acesso</h2>
+  <figure class="console">
+    <figcaption>primeiro acesso</figcaption>
+    <pre><code><span class="c"># compilar e inicializar (~/.lunadb: config, roles, root, master key)</span>
+<span class="p">$</span> cargo build --release
+<span class="p">$</span> ./target/release/lunadb init
+
+<span class="c"># subir a API em 127.0.0.1:7700</span>
+<span class="p">$</span> ./target/release/lunadb serve
+
+<span class="c"># logar com o root e guardar uma API key</span>
+<span class="p">$</span> BASE=http://127.0.0.1:7700
+<span class="p">$</span> KEY=$(curl -s -X POST $BASE/auth/login -H <span class="s">'content-type: application/json'</span> \
+      -d <span class="s">'{"username":"root","password":"changeme"}'</span> | jq -r .api_key)</code></pre>
+  </figure>
+
+  <p>A partir daí, criar um banco, uma tabela e o primeiro registro:</p>
+  <pre class="code"><code>curl -s -X POST $BASE/dbs -H <span class="s">"authorization: Bearer $KEY"</span> \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"name":"app"}'</span>
+
+curl -s -X POST $BASE/dbs/app/tables -H <span class="s">"authorization: Bearer $KEY"</span> \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"name":"notas"}'</span>
+
+curl -s -X POST $BASE/dbs/app/tables/notas/records -H <span class="s">"authorization: Bearer $KEY"</span> \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"titulo":"primeira nota"}'</span></code></pre>
+
+  <div class="callout warn">
+    <p>A senha padrão do root é <code>changeme</code>. Troque-a na config antes de expor o
+    servidor; no primeiro boot o texto puro do <code>config.toml</code> é substituído por um
+    hash argon2id. Trocar a senha revoga <strong>todas</strong> as API keys ativas do usuário.</p>
+  </div>
+
+  <h2 id="s-config">Configuração</h2>
+  <p>O gerador interativo <code>make luna-setup</code> pergunta <code>host</code>,
+  <code>port</code>, caminho e formato do storage, limite de corpo, timeout, usuário e senha do
+  root e as opções de log. Enter aceita o default mostrado entre colchetes; Enter na senha
+  gera uma aleatória, impressa uma única vez. O arquivo é gravado com modo <code>600</code>
+  e não sobrescreve uma config existente sem confirmação (use <code>--force</code>).</p>
+  <pre class="code"><code>make luna-setup                                  <span class="c"># grava ~/.lunadb/config.toml</span>
+make luna-setup ARGS=<span class="s">"--config /tmp/app/config.toml"</span>
+make luna-setup ARGS=<span class="s">"--force"</span></code></pre>
+
+  <h2 id="s-auth">Autenticação</h2>
+  <p>Todas as rotas (exceto <code>GET /health</code> e <code>POST /auth/login</code>) exigem um
+  header <code>Bearer</code>. As keys pertencem a um usuário e podem ser criadas e revogadas
+  individualmente; o plaintext só é retornado na criação e no login:</p>
+  <pre class="code"><code>Authorization: Bearer luna_&lt;64 hex&gt;</code></pre>
+
+  <h2 id="s-docker">Docker</h2>
+  <pre class="code"><code><span class="c"># imagem única</span>
+docker build -t lunadb .
+docker run -d --name lunadb -p 7700:7700 -v lunadb-data:/var/lib/lunadb lunadb
+
+<span class="c"># ou compose (container inicializa config, master key e root no primeiro boot)</span>
+docker compose up -d
+docker compose logs -f
+docker compose down   <span class="c"># os dados persistem no volume</span></code></pre>
+  <p>Para sobrescrever os defaults, monte um <code>config.toml</code> em
+  <code>/etc/lunadb/config.toml</code>.</p>
+
+  <h2 id="s-next">Próximos passos</h2>
+  <ul class="xrefs">
+    <li><label class="xref" for="t-api">API HTTP</label>: rotas, erros, query, agregações e paginação por cursor</li>
+    <li><label class="xref" for="t-cli">CLI &amp; shell</label>: REPL interativo e comandos scriptáveis de API key</li>
+    <li><label class="xref" for="t-sdk">SDK Python</label>: instalar <code>pip install -e lunapy</code> e usar <code>connect()</code> ou <code>LunaClient</code></li>
+    <li><label class="xref" for="t-ops">Operação</label>: backup, logs, métricas e problemas comuns</li>
+  </ul>
+
+  <div class="callout">
+    <p>Status do projeto: <strong>pré-1.0 (0.0.1)</strong>. A API e o formato em disco podem
+    mudar antes da 1.0.</p>
+  </div>
+</section>
+
+<!-- ============================================================ API -->
+<section class="panel" id="p-api">
+  <header class="page-head">
+    <h1>API HTTP</h1>
+    <p class="lede">Base padrão <code>http://127.0.0.1:7700</code> (configurável em
+    <code>config.toml</code> <span class="oblique">seção <code>[server]</code></span>).
+    Toda rota (exceto <code>/health</code> e <code>/auth/login</code>) exige o header
+    <code>Authorization: Bearer luna_&lt;64 hex&gt;</code>.</p>
+    <nav class="jump" aria-label="Nesta página">
+      <a href="#a-erros">Erros</a>
+      <a href="#a-sistema">Sistema</a>
+      <a href="#a-auth">Auth e keys</a>
+      <a href="#a-users">Usuários</a>
+      <a href="#a-dbs">Databases</a>
+      <a href="#a-schema">Tabelas e schema</a>
+      <a href="#a-records">Registros</a>
+      <a href="#a-query">Query</a>
+      <a href="#a-agg">Agregações</a>
+    </nav>
+  </header>
+
+  <h2 id="a-erros">Erros</h2>
+  <p>Todo erro vem com corpo JSON e o corpo de cada requisição é limitado a
+  <code>[server] max_body_bytes</code> (default 10 MiB), com processamento limitado a
+  <code>request_timeout_secs</code> (30s → <code>408</code>).</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Status</th><th>Significado</th><th>Corpo</th></tr></thead>
+    <tbody>
+      <tr><td><code>400</code></td><td>requisição inválida / validação</td><td><code>{"error":"...","fields":[{"field":"email","message":"..."}]}</code></td></tr>
+      <tr><td><code>401</code></td><td>API key ausente ou inválida</td><td><code>{"error":"api key ausente ou invalida"}</code></td></tr>
+      <tr><td><code>403</code></td><td>sem permissão no DB ou ação admin</td><td><code>{"error":"..."}</code></td></tr>
+      <tr><td><code>404</code></td><td>não encontrado</td><td><code>{"error":"..."}</code></td></tr>
+      <tr><td><code>409</code></td><td>conflito (unique, já existe, schema rejeitado)</td><td><code>{"error":"...","fields":[...]}</code> ou <code>{"records":[{"id":"...","fields":[...]}]}</code></td></tr>
+      <tr><td><code>422</code></td><td>JSON malformado ou campo desconhecido no corpo</td><td>texto do extractor</td></tr>
+      <tr><td><code>429</code></td><td>bloqueio temporário de login (5 falhas → 60s)</td><td><code>{"error":"..."}</code> + header <code>Retry-After</code></td></tr>
+      <tr><td><code>500</code></td><td>erro interno / falha de criptografia</td><td><code>{"error":"..."}</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="a-sistema">Sistema</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Permissão</th><th>Retorno</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span></td><td><code>/health</code></td><td>público</td><td><code>{"status":"ok","name":"lunadb","version":"0.0.1"}</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/status</code></td><td>admin</td><td><code>pid, version, started_at, uptime_seconds, host, port, storage, config, users, dbs</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/metrics</code></td><td>público</td><td>contadores Prometheus em texto: <code>lunadb_build_info</code>, <code>lunadb_requests_total</code>, <code>lunadb_responses_total{status_class}</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="a-auth">Auth e API keys</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Permissão</th><th>Detalhes</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m post">POST</span></td><td><code>/auth/login</code></td><td>público</td><td><code>{"username","password"}</code> → <code>{"user":{...},"api_key":"luna_..."}</code>; rotaciona apenas a key de nome <code>login</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/auth/rotate-key</code></td><td>auth</td><td>mesma semântica do login</td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/auth/api-keys</code></td><td>auth</td><td>lista as keys do próprio usuário</td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/auth/api-keys</code></td><td>auth</td><td><code>{"name":"ci"}</code> → <code>201</code>; plaintext exibido uma única vez; default <code>"default"</code>, máx. 50 ativas</td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>/auth/api-keys/{key_id|prefixo}</code></td><td>auth</td><td><code>200</code> com <code>"revoked":true</code>; <code>409</code> se já revogada ou prefixo ambíguo</td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/me</code></td><td>auth</td><td><code>{id, username, role, grants, created_at}</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/roles</code></td><td>auth</td><td><code>[{name, description, builtin, permissions}]</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="a-users">Usuários (admin)</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Detalhes</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span></td><td><code>/users</code></td><td>lista de <code>UserPublic</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/users</code></td><td><code>{"username","password","role":"user","grants":[{"db":"app","level":"write"}]}</code>; senha mínima de 6 caracteres</td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>/users/{id}</code></td><td><code>204</code>; não pode remover a si mesmo nem o último admin</td></tr>
+      <tr><td><span class="m put">PUT</span></td><td><code>/users/{id}/grants</code></td><td><code>{"grants":[{"db":"app","level":"read"},{"db":"*","level":"read"}]}</code></td></tr>
+      <tr><td><span class="m put">PUT</span></td><td><code>/users/{id}/password</code></td><td>admin troca sem <code>current_password</code>; o próprio usuário informa. A troca revoga todas as API keys ativas</td></tr>
+      <tr><td><span class="m get">GET</span> <span class="m post">POST</span></td><td><code>/users/{id}/api-keys</code></td><td>mesmo contrato de <code>/auth/api-keys</code>, para qualquer usuário (admin)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Níveis de grant:</strong> <code>read</code> &lt; <code>write</code> &lt; <code>admin</code>
+  (admin do banco gerencia tabelas/schema e pode removê-lo). O nível efetivo é o máximo entre
+  os grants do usuário e as permissões da role, com <code>*</code> valendo para qualquer banco.</p>
+
+  <h2 id="a-dbs">Databases</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Permissão</th><th>Retorno</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span></td><td><code>/dbs</code></td><td>auth (filtra por ACL)</td><td><code>[DbMeta]</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/dbs</code></td><td>admin global</td><td><code>201</code> <code>DbMeta</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>/dbs/{db}</code></td><td>read</td><td><code>DbMeta</code></td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>/dbs/{db}</code></td><td>admin global ou grant <code>admin</code></td><td><code>204</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <pre class="code"><code>DbMeta: {"name":"app","owner_id":"...","created_at":"2026-10-10T03:02:52Z"}</code></pre>
+
+  <h2 id="a-schema">Tabelas e schema</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Permissão</th><th>Retorno</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span></td><td><code>/dbs/{db}/tables</code></td><td>read</td><td><code>{"db":"app","tables":["notas"]}</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/dbs/{db}/tables</code></td><td>write</td><td><code>201</code>; aceita schema inline (abaixo)</td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>/dbs/{db}/tables/{table}</code></td><td>write</td><td><code>204</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>.../schema</code></td><td>read</td><td><code>TableSchema</code> (404 se não houver)</td></tr>
+      <tr><td><span class="m put">PUT</span></td><td><code>.../schema</code></td><td>write</td><td>revalida e recifra os registros; <code>409</code> se violar; <code>?force=true</code> aplica mesmo assim</td></tr>
+      <tr><td><span class="m patch">PATCH</span></td><td><code>.../schema</code></td><td>write</td><td>migração incremental (abaixo); cria schema do zero se não houver</td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>.../schema</code></td><td>write</td><td><code>204</code>; decifra os campos <code>encrypted</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>DSL de schema</h3>
+  <pre class="code"><code>{
+  "strict": true,
+  "unique": ["cpf", ["tenant_id", "email"]],
+  "fields": {
+    "email":      {"type":"string","required":true,"pattern":".+@.+\\..+","unique":true},
+    "senha":      {"type":"string","required":true,"encrypted":true,"min_length":8},
+    "idade":      {"type":"int","min":0,"max":150},
+    "ativo":      {"type":"bool","default":true},
+    "tags":       {"type":"array","items":{"type":"string"}},
+    "endereco":   {"type":"object","fields":{"cidade":{"type":"string","required":true}}},
+    "external_id":{"type":"uuid"},
+    "nascimento": {"type":"date"},
+    "criado":     {"type":"datetime","auto":"created_at"},
+    "atualizado": {"type":"datetime","auto":"updated_at"},
+    "meta":       {"type":"any"}
+  }
+}</code></pre>
+  <ul class="bullets">
+    <li><strong>Tipos:</strong> <code>string</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>datetime</code> (RFC3339), <code>date</code> (<code>YYYY-MM-DD</code>), <code>uuid</code>, <code>object</code>, <code>array</code>, <code>any</code>.</li>
+    <li><strong>Propriedades de campo:</strong> <code>required</code>, <code>nullable</code>, <code>default</code>, <code>unique</code> e <code>encrypted</code> (ambos só no topo), <code>min</code>/<code>max</code>, <code>min_length</code>/<code>max_length</code>, <code>pattern</code>, <code>enum</code>, <code>items</code>, <code>fields</code>, <code>auto</code>.</li>
+    <li><strong><code>encrypted</code>:</strong> valor cifrado em disco (AES-256-GCM) e decifrado de forma transparente na API; continua filtrável, mas não pode ser <code>unique</code>.</li>
+    <li><strong><code>strict</code>:</strong> rejeita campos não declarados no registro.</li>
+  </ul>
+
+  <h3>Migração incremental (<code>PATCH .../schema</code>)</h3>
+  <pre class="code"><code>{
+  "add": {"telefone": {"type": "string", "required": false}},
+  "update": {"email": {"required": true, "max_length": 120}},
+  "remove": ["campo_antigo"],
+  "unique_add": [["tenant_id", "email"]],
+  "unique_remove": ["cpf"],
+  "strict": true
+}</code></pre>
+  <ul class="bullets">
+    <li><code>add</code>: insere campos novos; erro 400 se o campo já existir (use <code>update</code>).</li>
+    <li><code>update</code>: merge raso nas propriedades do campo; <code>null</code> limpa a propriedade; erro 400 se não existir.</li>
+    <li><code>remove</code>: remove campos; erro 400 se não existir. Campos removidos em modo não-strict permanecem nos registros (nenhum dado é apagado).</li>
+    <li><code>unique_add</code> / <code>unique_remove</code>: chave simples (<code>"email"</code>) ou composta (<code>["a","b"]</code>).</li>
+    <li>Registros inválidos após a operação → <code>409</code> com os ids; <code>?force=true</code> aplica mesmo assim.</li>
+  </ul>
+
+  <h2 id="a-records">Registros</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Rota</th><th>Permissão</th><th>Retorno</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span></td><td><code>/dbs/{db}/tables/{t}/records?limit=&amp;offset=&amp;cursor=</code></td><td>read</td><td><code>{db, table, total, count, next_cursor, records}</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>/dbs/{db}/tables/{t}/records</code></td><td>write</td><td><code>201</code> registro com <code>_id</code> gerado pelo servidor</td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>.../records/validate</code></td><td>write</td><td><code>200</code> registro preparado (dry-run, não persiste)</td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>.../records/query</code></td><td>read</td><td><code>{db, table, total, count, next_cursor, records}</code></td></tr>
+      <tr><td><span class="m post">POST</span></td><td><code>.../records/aggregate</code></td><td>read</td><td><code>{db, table, total, count, groups}</code></td></tr>
+      <tr><td><span class="m get">GET</span></td><td><code>.../records/{id}</code></td><td>read</td><td>registro</td></tr>
+      <tr><td><span class="m put">PUT</span></td><td><code>.../records/{id}</code></td><td>write</td><td>registro (substituição total)</td></tr>
+      <tr><td><span class="m patch">PATCH</span></td><td><code>.../records/{id}</code></td><td>write</td><td>registro (merge parcial, RFC 7386; <code>null</code> remove a chave)</td></tr>
+      <tr><td><span class="m delete">DELETE</span></td><td><code>.../records/{id}</code></td><td>write</td><td><code>204</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><code>total</code> é o tamanho da tabela e <code>count</code> o retornado na página.
+  <code>limit</code> é limitado a 1000 (default).<p>
+
+  <h3>Paginação por cursor</h3>
+  <pre class="code"><code><span class="c"># primeira página</span>
+curl -s "$BASE/dbs/app/tables/notas/records?limit=50" -H <span class="s">"authorization: Bearer $KEY"</span>
+<span class="c"># -> {"total":1200,...,"next_cursor":"eyJrIjpbLi4uXX0"}</span>
+
+<span class="c"># próxima página</span>
+curl -s "$BASE/dbs/app/tables/notas/records?limit=50&amp;cursor=eyJrIjpbLi4uXX0" \
+  -H <span class="s">"authorization: Bearer $KEY"</span></code></pre>
+  <ul class="bullets">
+    <li>O cursor é uma posição <strong>keyset</strong> em base64url, não um offset; uma varredura nunca pula nem repete registro, mesmo com escritas concorrentes.</li>
+    <li><code>_id</code> é sempre a última chave de ordenação (desempate). Sem <code>sort</code>, ordem por <code>_id</code> crescente.</li>
+    <li><code>next_cursor</code> só vem enquanto houver mais páginas; a última (curta) o omite.</li>
+    <li>Enviar <code>cursor</code> e <code>offset</code> juntos usa o cursor e ignora o offset; cursor malformado ou incompatível com o <code>sort</code> atual → <code>400</code>.</li>
+  </ul>
+
+  <h2 id="a-query">Query</h2>
+  <pre class="code"><code>{
+  "filter": {"$or": [{"idade": {"$gte": 18}}, {"tags": {"$contains": "vip"}}],
+             "endereco.cidade": "SP"},
+  "sort": ["-idade", {"field": "nome", "dir": "asc"}],
+  "fields": ["nome", "endereco.cidade"],
+  "limit": 20,
+  "offset": 0,
+  "cursor": "eyJrIjpbLi4uXX0"
+}</code></pre>
+  <ul class="bullets">
+    <li><strong>Operadores:</strong> <code>$eq</code>, <code>$ne</code>, <code>$gt</code>, <code>$gte</code>, <code>$lt</code>, <code>$lte</code>, <code>$in</code>, <code>$nin</code>, <code>$exists</code>, <code>$contains</code> (substring em string, pertence em array), <code>$starts_with</code>, <code>$ends_with</code>, <code>$regex</code>, <code>$and</code>, <code>$or</code>, <code>$not</code>. Igualdade é implícita: <code>{"tenant": "t1"}</code>.</li>
+    <li><strong>Caminhos:</strong> <code>a.b</code> (objetos) e <code>tags.0</code> (índice de array); filtro por <code>_id</code> funciona.</li>
+    <li><strong><code>sort</code>:</strong> <code>"campo"</code>, <code>"-campo"</code> (desc) ou <code>{"field","dir"}</code>; nulos e ausentes sempre por último.</li>
+    <li><strong><code>fields</code>:</strong> projeção (aceita caminhos aninhados); <code>_id</code> sempre incluído. Campos <code>encrypted</code> podem ser filtrados (decifra em memória).</li>
+    <li>Operador, filtro ou cursor inválido → <code>400</code>; campo desconhecido no corpo → <code>422</code>.</li>
+  </ul>
+
+  <h2 id="a-agg">Agregações</h2>
+  <pre class="code"><code>{
+  "filter": {"ativo": true},
+  "group_by": ["cidade"],
+  "aggregates": {
+    "total":  {"op": "count"},
+    "receita": {"op": "sum", "field": "valor"},
+    "ticket":  {"op": "avg", "field": "valor"},
+    "menor":   {"op": "min", "field": "valor"},
+    "maior":   {"op": "max", "field": "valor"}
+  },
+  "limit": 50
+}</code></pre>
+  <p>Retorna <code>groups</code>, cada um com <code>key</code> (valores de <code>group_by</code>),
+  <code>count</code> e o resultado de cada agregado. Operações: <code>count</code>, <code>sum</code>,
+  <code>avg</code>, <code>min</code>, <code>max</code> (as numéricas exigem <code>field</code>).
+  Grupos são ordenados pela chave.</p>
+</section>
+
+<!-- ============================================================ CLI -->
+<section class="panel" id="p-cli">
+  <header class="page-head">
+    <h1>CLI &amp; shell</h1>
+    <p class="lede">O binário <code>lunadb</code> tem dois usos: <strong>servidor</strong>
+    (<code>lunadb serve</code>, <code>init</code>, <code>migrate</code>) e
+    <strong>cliente</strong> (<code>shell</code> REPL e <code>apikey</code> scriptável).</p>
+    <nav class="jump" aria-label="Nesta página">
+      <a href="#c-flags">Flags e env</a>
+      <a href="#c-server">Servidor</a>
+      <a href="#c-apikey">API keys</a>
+      <a href="#c-migrate">Migração</a>
+      <a href="#c-shell">Shell</a>
+      <a href="#c-exemplo">Sessão de exemplo</a>
+    </nav>
+  </header>
+
+  <h2 id="c-flags">Flags globais e variáveis de ambiente</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Flag</th><th>Descrição</th></tr></thead>
+    <tbody>
+      <tr><td><code>--config &lt;path&gt;</code></td><td>caminho do <code>config.toml</code> (default <code>~/.lunadb/config.toml</code>)</td></tr>
+      <tr><td><code>--server &lt;url&gt;</code></td><td>URL da API para comandos cliente (default: <code>host:port</code> da config)</td></tr>
+      <tr><td><code>--key &lt;key&gt;</code></td><td>API key para comandos cliente</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Variáveis: <code>LUNADB_CONFIG</code>, <code>LUNADB_API_KEY</code>,
+  <code>LUNADB_MASTER_KEY</code>, <code>RUST_LOG</code>.</p>
+
+  <h2 id="c-server">Servidor</h2>
+  <pre class="code"><code>lunadb init      <span class="c"># cria ~/.lunadb (config, roles, root, master key) e sai</span>
+lunadb serve     <span class="c"># sobe a API; Ctrl+C / SIGTERM encerram de forma graciosa</span></code></pre>
+  <p>Para a configuração interativa, veja <label class="xref" for="t-setup">Setup</label>
+  (<code>make luna-setup</code>).</p>
+
+  <h2 id="c-apikey">API keys (não-interativo)</h2>
+  <pre class="code"><code>export LUNADB_API_KEY=luna_...    <span class="c"># key de um admin</span>
+
+lunadb apikey create bob --name ci      <span class="c"># imprime a key nova (uma única vez)</span>
+lunadb apikey list bob                  <span class="c"># JSON das keys do bob</span>
+lunadb apikey list                      <span class="c"># JSON das próprias keys</span>
+lunadb apikey revoke bob luna_abc123    <span class="c"># por id ou prefixo</span></code></pre>
+  <p>A saída de <code>create</code> é apenas a key (para <code>$()</code> em scripts);
+  <code>list</code> e <code>revoke</code> retornam JSON.</p>
+
+  <h2 id="c-migrate">Migração de formato (offline)</h2>
+  <p>Converte todas as tabelas entre MessagePack (default) e JSON. Exige servidor parado
+  (detecta via <code>infra/status.json</code> e pid; use <code>--force</code> para ignorar).</p>
+  <pre class="code"><code>lunadb migrate --to json
+lunadb migrate --to msgpack --force</code></pre>
+
+  <h2 id="c-shell">Shell interativo</h2>
+  <pre class="code"><code>lunadb shell
+lunadb shell --server http://127.0.0.1:7700 --key luna_...</code></pre>
+  <ul class="bullets">
+    <li>Histórico persistido em <code>~/.lunadb/infra/shell_history</code>.</li>
+    <li><code>login</code> sem senha usa prompt oculto.</li>
+    <li>JSON sempre entre <strong>aspas simples</strong> (o parser remove as duplas):
+    <code>add app notas '{"titulo":"oi"}'</code>.</li>
+    <li><code>exit</code>, <code>quit</code> ou Ctrl+D encerram; erros aparecem como
+    <code>erro: HTTP 403: ...</code> sem acabar com a sessão.</li>
+  </ul>
+
+  <h3>Sessão e diagnóstico</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Comando</th><th>Exemplo</th></tr></thead>
+    <tbody>
+      <tr><td><code>login &lt;user&gt; [senha]</code></td><td><code>login root</code> (pede a senha)</td></tr>
+      <tr><td><code>whoami</code></td><td>retorna o <code>UserPublic</code> atual</td></tr>
+      <tr><td><code>status</code></td><td>pid, uptime, host/porta, contagens</td></tr>
+      <tr><td><code>key rotate</code></td><td>rotaciona a chave <code>login</code> e exibe a nova</td></tr>
+      <tr><td><code>help</code></td><td>lista os comandos</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Databases e tabelas</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Comando</th><th>Exemplo</th></tr></thead>
+    <tbody>
+      <tr><td><code>dbs</code></td><td><code>dbs</code></td></tr>
+      <tr><td><code>db create &lt;db&gt;</code> / <code>db rm &lt;db&gt;</code></td><td><code>db create app</code></td></tr>
+      <tr><td><code>tables &lt;db&gt;</code></td><td><code>tables app</code></td></tr>
+      <tr><td><code>table create &lt;db&gt; &lt;t&gt; [schema-json]</code></td><td><code>table create app users '{"fields":{"email":{"type":"string"}}}'</code></td></tr>
+      <tr><td><code>table rm &lt;db&gt; &lt;t&gt;</code></td><td><code>table rm app users</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Schema</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Comando</th><th>Exemplo</th></tr></thead>
+    <tbody>
+      <tr><td><code>schema get &lt;db&gt; &lt;t&gt;</code></td><td><code>schema get app users</code></td></tr>
+      <tr><td><code>schema set &lt;db&gt; &lt;t&gt; &lt;json&gt; [--force]</code></td><td><code>schema set app users '{"fields":{...}}' --force</code></td></tr>
+      <tr><td><code>schema patch &lt;db&gt; &lt;t&gt; &lt;json&gt; [--force]</code></td><td><code>schema patch app users '{"add":{"tel":{"type":"string"}}}'</code></td></tr>
+      <tr><td><code>schema add-field &lt;db&gt; &lt;t&gt; &lt;nome&gt; &lt;json&gt; [--force]</code></td><td><code>schema add-field app users tel '{"type":"string","default":""}'</code></td></tr>
+      <tr><td><code>schema rm-field &lt;db&gt; &lt;t&gt; &lt;campo&gt;... [--force]</code></td><td><code>schema rm-field app users antigo outro</code></td></tr>
+      <tr><td><code>schema update-field &lt;db&gt; &lt;t&gt; &lt;campo&gt; &lt;json&gt; [--force]</code></td><td><code>schema update-field app users email '{"required":true,"max":null}'</code></td></tr>
+      <tr><td><code>schema unique add/rm &lt;db&gt; &lt;t&gt; &lt;chave&gt; [--force]</code></td><td><code>schema unique add app users tenant+email</code></td></tr>
+      <tr><td><code>schema rm &lt;db&gt; &lt;t&gt;</code></td><td>remove o schema inteiro</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Todas funcionam mesmo se a tabela ainda não tiver schema (criam do zero). Sem
+  <code>--force</code>, registros que violem o novo schema retornam
+  <code>erro: HTTP 409 ...</code> com os ids.</p>
+
+  <h3>Registros e query</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Comando</th><th>Exemplo</th></tr></thead>
+    <tbody>
+      <tr><td><code>list &lt;db&gt; &lt;t&gt; [limit] [offset]</code></td><td><code>list app users 10 0</code></td></tr>
+      <tr><td><code>list-next &lt;db&gt; &lt;t&gt; &lt;cursor&gt; [limit]</code></td><td><code>list-next app users eyJrIjpbLi4uXX0 10</code></td></tr>
+      <tr><td><code>walk &lt;db&gt; &lt;t&gt; [page-size]</code></td><td><code>walk app users 200</code> (percorre todos os registros)</td></tr>
+      <tr><td><code>get &lt;db&gt; &lt;t&gt; &lt;id&gt;</code></td><td><code>get app users 0f045bbf-...</code></td></tr>
+      <tr><td><code>add / put / patch / rm &lt;db&gt; &lt;t&gt; ...</code></td><td><code>patch app users &lt;id&gt; '{"idade":31,"tel":null}'</code></td></tr>
+      <tr><td><code>query &lt;db&gt; &lt;t&gt; '&lt;json&gt;'</code></td><td><code>query app users '{"filter":{"idade":{"$gte":18}},"sort":["-idade"]}'</code></td></tr>
+      <tr><td><code>aggregate &lt;db&gt; &lt;t&gt; '&lt;json&gt;'</code></td><td><code>aggregate app users '{"group_by":["cidade"],"aggregates":{"n":{"op":"count"}}}'</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Usuários, grants e API keys</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Comando</th><th>Exemplo</th></tr></thead>
+    <tbody>
+      <tr><td><code>users</code></td><td>lista usuários (admin)</td></tr>
+      <tr><td><code>user add &lt;user&gt; &lt;senha&gt; [role] [db:level ...]</code></td><td><code>user add bob bob12345 user app:write</code></td></tr>
+      <tr><td><code>user rm &lt;id&gt;</code></td><td><code>user rm 3d717770-...</code></td></tr>
+      <tr><td><code>grants &lt;user-id&gt; '&lt;json&gt;'</code></td><td><code>grants &lt;id&gt; '[{"db":"app","level":"read"}]'</code></td></tr>
+      <tr><td><code>apikey create &lt;user&gt; [--name &lt;nome&gt;]</code></td><td><code>apikey create bob --name ci</code></td></tr>
+      <tr><td><code>apikey list [user]</code></td><td><code>apikey list bob</code> (sem user = próprias)</td></tr>
+      <tr><td><code>apikey revoke &lt;user&gt; &lt;id|prefixo&gt;</code></td><td><code>apikey revoke bob luna_abc123</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="c-exemplo">Sessão de exemplo</h2>
+  <figure class="console">
+    <figcaption>repl</figcaption>
+    <pre><code><span class="p">$</span> lunadb shell
+LunaDB shell (http://127.0.0.1:7700) - 'help' para comandos, 'exit' para sair
+lunadb&gt; login root
+senha de root:
+logado como root
+lunadb&gt; db create app
+db 'app' criado
+lunadb&gt; table create app notas '{"fields":{"titulo":{"type":"string","required":true}}}'
+tabela 'app.notas' criada
+lunadb&gt; add app notas '{"titulo":"primeira nota"}'
+{
+  "_id": "0f045bbf-5a9a-43b5-81b4-46d9758c9721",
+  "titulo": "primeira nota"
+}
+lunadb&gt; query app notas '{"filter":{"titulo":{"$contains":"primeira"}},"fields":["titulo"]}'
+{
+  "count": 1,
+  "db": "app",
+  "records": [ { "_id": "...", "titulo": "primeira nota" } ],
+  "table": "notas",
+  "total": 1
+}
+lunadb&gt; apikey create root --name console
+api key criada (guarde agora): luna_4a7973...
+lunadb&gt; exit</code></pre>
+  </figure>
+</section>
+
+<!-- ============================================================ SDK -->
+<section class="panel" id="p-sdk">
+  <header class="page-head">
+    <h1>SDK Python (<code>lunapy</code>)</h1>
+    <p class="lede">Cliente oficial sem dependências externas (apenas stdlib), que fala com a
+    API por HTTP. Todos os métodos levantam exceções tipadas, e os atalhos novos
+    (handles, queries encadeadas e <code>Record</code>) não substituem a API original.</p>
+    <nav class="jump" aria-label="Nesta página">
+      <a href="#k-instalar">Instalação</a>
+      <a href="#k-cliente">Cliente</a>
+      <a href="#k-handles">Handles</a>
+      <a href="#k-query">Queries</a>
+      <a href="#k-sessao">Sessão</a>
+      <a href="#k-dbs">Databases e schema</a>
+      <a href="#k-records">Registros</a>
+      <a href="#k-cursor">Paginação por cursor</a>
+      <a href="#k-erros">Erros</a>
+    </nav>
+  </header>
+
+  <h2 id="k-instalar">Instalação</h2>
+  <pre class="code"><code>pip install -e lunapy          <span class="c"># a partir deste repositório</span>
+pip install -e "lunapy[dev]"   <span class="c"># com pytest</span></code></pre>
+
+  <h2 id="k-cliente">Criando o cliente</h2>
+  <pre class="code"><code><span class="s">from lunapy import LunaClient, connect</span>
+
+<span class="c"># a partir do config.toml (~/.lunadb ou LUNADB_CONFIG)</span>
+client = LunaClient.from_config()
+
+<span class="c"># ou explícito; as envs LUNADB_URL / LUNADB_API_KEY também são aceitas</span>
+client = LunaClient(base_url="http://127.0.0.1:7700", api_key="luna_...")
+
+<span class="c"># cria o cliente e faz login em um passo; funciona como context manager</span>
+<span class="s">with</span> connect(base_url="http://127.0.0.1:7700",
+             username="root", password="changeme") <span class="s">as</span> client:
+    print(client.me().username)
+
+<span class="c"># login avulso: rotaciona a chave "login" e guarda no cliente</span>
+user = client.login("root", "changeme")
+print(user.username, user.role)</code></pre>
+  <p><code>connect()</code> é equivalente a <code>LunaClient.connect(...)</code>; sem
+  argumentos usa <code>LUNADB_URL</code>/<code>LUNADB_API_KEY</code> e o host padrão.</p>
+
+  <h2 id="k-handles">Handles (menos repetição)</h2>
+  <p><code>client.db()</code> e <code>client.table()</code> devolvem handles leves que
+  guardam o banco/tabela. Todos os métodos de baixo nível continuam disponíveis e iguais.</p>
+  <pre class="code"><code>app = <span class="s">client.db</span>("app")             <span class="c"># ou client["app"]</span>
+users = app.create_table("users")  <span class="c"># -> Table</span>
+users = app["users"]               <span class="c"># handle para tabela existente</span>
+
+<span class="s">users.create</span>(name="Ana", age=30)   <span class="c"># kwargs viram campos do registro</span>
+record = <span class="s">users.first</span>(name="Ana")   <span class="c"># -> Record</span>
+print(record.name, record["age"])
+
+<span class="s">users.update</span>(record["_id"], age=31)
+<span class="s">users.replace</span>(record["_id"], name="Ana", age=32)
+<span class="s">users.delete</span>(record["_id"])
+
+<span class="s">for</span> person <span class="s">in</span> users:               <span class="c"># paginação por cursor por baixo</span>
+    print(person.name)
+
+len(users)                         <span class="c"># users.count()</span>
+record["_id"] <span class="s">in</span> users             <span class="c"># checa existência</span>
+users[record["_id"]]               <span class="c"># users.get(id)</span></code></pre>
+  <p><code>Record</code> é subclasse de <code>dict</code>: <code>record["nome"]</code>
+  continua funcionando e <code>record.nome</code> é um atalho. Métodos de dict têm
+  precedência em nomes conflitantes, então use <code>record["items"]</code> para um campo
+  chamado <code>items</code>.</p>
+
+  <h2 id="k-query">Queries encadeadas</h2>
+  <pre class="code"><code><span class="s">for</span> user <span class="s">in</span> users.where(idade__gte=18).sort("-idade").select("nome", "idade").limit(50):
+    print(user.nome)
+
+<span class="s">users.where</span>(tags__contains="vip").count()
+<span class="s">users.where</span>(cidade="SP").first()       <span class="c"># -> Record | None</span>
+<span class="s">users.where</span>(idade__gte=18).ids()       <span class="c"># -> lista de _id</span>
+<span class="s">users.where</span>(idade__gte=18).one()       <span class="c"># LunaNotFoundError se vazio</span></code></pre>
+  <p>Operadores por keyword: <code>eq</code>, <code>ne</code>, <code>gt</code>,
+  <code>gte</code>, <code>lt</code>, <code>lte</code>, <code>in</code>, <code>nin</code>,
+  <code>contains</code>, <code>startswith</code>, <code>ends_with</code>, <code>regex</code>
+  e <code>exists</code>. Para <code>$and</code>/<code>$or</code>/<code>$not</code> ou nomes
+  com ponto (<code>"endereco.cidade"</code>), passe <code>filter={...}</code> explicitamente.</p>
+
+  <h2 id="k-sessao">Sessão, sistema e keys</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Método</th><th>Retorno</th></tr></thead>
+    <tbody>
+      <tr><td><code>health()</code> / <code>status()</code></td><td><code>dict</code> (<code>status</code> é admin)</td></tr>
+      <tr><td><code>login(username, password)</code></td><td><code>User</code> (grava <code>client.api_key</code>)</td></tr>
+      <tr><td><code>rotate_key()</code></td><td><code>str</code> (nova key)</td></tr>
+      <tr><td><code>me()</code></td><td><code>User</code></td></tr>
+      <tr><td><code>create_api_key(name="ci")</code> / <code>(user.id, name="ci")</code></td><td><code>(key, plaintext)</code>; variante com id é admin</td></tr>
+      <tr><td><code>list_api_keys()</code> / <code>list_api_keys(user.id)</code></td><td><code>list[ApiKey]</code></td></tr>
+      <tr><td><code>revoke_api_key(key.id)</code> / <code>(key.id, user.id)</code></td><td>id ou prefixo</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Usuários e roles (admin)</h3>
+  <pre class="code"><code><span class="s">client.list_users()</span>                                                        <span class="c"># -> list[User]</span>
+<span class="s">client.create_user("bob", "bob12345", role="user", grants=[("app", "write")])</span>
+<span class="s">client.set_grants(user.id, [Grant(db="app", level=Level.READ)])</span>             <span class="c"># -> User</span>
+<span class="s">client.set_password(user.id, "novaSenha123", current_password="antiga123")</span>
+<span class="s">client.delete_user(user.id)</span>
+<span class="s">client.list_roles()</span>                                                        <span class="c"># -> list[Role]</span></code></pre>
+  <p><code>grants</code> aceita <code>Grant</code>, dict <code>{"db":..., "level":...}</code>,
+  tupla <code>("db","write")</code> ou lista <code>["db","write"]</code>.</p>
+
+  <h2 id="k-dbs">Databases, tabelas e schema</h2>
+  <pre class="code"><code><span class="s">client.list_dbs()</span>          <span class="c"># -> list[DbMeta]</span>
+<span class="s">client.create_db("app")</span>    <span class="c"># -> DbMeta (admin)</span>
+<span class="s">client.get_db("app")</span>
+<span class="s">client.delete_db("app")</span></code></pre>
+  <pre class="code"><code><span class="s">from lunapy import TableSchema, Field</span>
+
+schema = TableSchema.of(
+    tenant=Field.string(required=True),
+    email=Field.string(required=True, unique=True, pattern=r".+@.+\..+"),
+    senha=Field.string(required=True, encrypted=True, min_length=8),
+    idade=Field.int(min=0, max=150),
+    ativo=Field.bool(default=True),
+    tags=Field.array(items="string"),
+    criado=Field.datetime(auto="created_at"),
+)
+
+<span class="c"># TableSchema(unique="cpf") também vale; strings e dicts crus são aceitos</span>
+<span class="s">client.create_table</span>("app", "users", schema=schema)      <span class="c"># schema opcional</span>
+<span class="s">client.list_tables</span>("app")                               <span class="c"># -> list[str]</span>
+<span class="s">client.get_schema</span>("app", "users")                       <span class="c"># -> TableSchema</span>
+<span class="s">client.set_schema</span>("app", "users", schema, force=False)  <span class="c"># -> TableSchema</span>
+<span class="s">client.delete_schema</span>("app", "users")
+<span class="s">client.delete_table</span>("app", "users")</code></pre>
+  <p>Atalhos: <code>Field.string</code>, <code>Field.int</code>, <code>Field.bool</code>,
+  <code>Field.array</code>, <code>Field.datetime</code>, <code>Field.uuid</code>,
+  <code>Field.object</code> e <code>Field.any</code>. <code>Field("bool")</code>,
+  <code>FieldType</code> e <code>AutoField</code> continuam aceitos; o schema também pode ser
+  passado como dict cru.</p>
+
+  <h3>Migração incremental</h3>
+  <p>Funciona também quando a tabela ainda não tem schema (cria do zero):</p>
+  <pre class="code"><code><span class="c"># patch genérico (mesmo corpo da API PATCH)</span>
+<span class="s">client.patch_schema</span>("app", "users", {"add": {"tel": {"type": "string"}}, "strict": False})
+
+<span class="c"># atalhos no cliente ou no handle da tabela</span>
+users = client.table("app", "users")
+users.add_fields({"tel": Field.string(default="")})
+users.update_field("email", {"required": True, "max": None}, force=True)
+users.remove_fields("tel", "campo_antigo")
+users.add_unique("cpf")                    <span class="c"># ou ("tenant", "email")</span>
+users.remove_unique("cpf", force=True)</code></pre>
+  <ul class="bullets">
+    <li><code>add_schema_fields</code> aceita <code>Field</code> ou dict; <code>update_schema_field</code> faz merge e <code>None</code> limpa a propriedade.</li>
+    <li><code>force=True</code> aplica mesmo com registros inválidos; sem ele, violações levantam <code>LunaSchemaRejectedError</code> (com <code>.records</code>).</li>
+    <li>Operações inválidas → <code>LunaBadRequestError</code>. <code>TableSchema.to_dict()/from_dict()</code> serializam para o formato da API; dicts crus também são aceitos em <code>create_table</code>/<code>set_schema</code>.</li>
+  </ul>
+
+  <h2 id="k-records">Registros</h2>
+  <pre class="code"><code>record = <span class="s">client.create_record</span>("app", "users", {"email": "a@x.com", "senha": "segredo1"})
+record = <span class="s">client.create_record</span>("app", "users", email="a@x.com", senha="segredo1")  <span class="c"># kwargs</span>
+<span class="s">client.get_record</span>("app", "users", record["_id"])
+<span class="s">client.replace_record</span>("app", "users", record["_id"], {"email": "b@x.com", "senha": "outra123"})
+<span class="s">client.patch_record</span>("app", "users", record["_id"], {"idade": 31, "tel": None})  <span class="c"># merge parcial</span>
+<span class="s">client.update_record</span>("app", "users", record["_id"], idade=32)                   <span class="c"># alias + kwargs</span>
+<span class="s">client.validate_record</span>("app", "users", {"email": "c@x.com"})  <span class="c"># dry-run -> Record</span>
+<span class="s">client.list_records</span>("app", "users", limit=10, offset=0)       <span class="c"># -> list[Record]</span>
+<span class="s">client.count</span>("app", "users")                                 <span class="c"># -> int</span>
+<span class="s">client.exists</span>("app", "users", record["_id"])                  <span class="c"># -> bool</span>
+<span class="s">client.delete_record</span>("app", "users", record["_id"])</code></pre>
+  <p>Ou, no handle: <code>users.create(...)</code>, <code>users.get(id)</code>,
+  <code>users.update(id, ...)</code>, <code>users.all()</code>, <code>users.page()</code>,
+  <code>users[record["_id"]]</code>, <code>record["_id"] in users</code>.</p>
+
+  <h2 id="k-cursor">Paginação por cursor</h2>
+  <pre class="code"><code>page = <span class="s">client.list_records_page</span>("app", "users", limit=100)
+page.total        <span class="c"># tamanho da tabela, igual em todas as páginas</span>
+page.count        <span class="c"># registros nesta página</span>
+page.records      <span class="c"># tuple[Record, ...]</span>
+page.next_cursor  <span class="c"># str | None na última página</span>
+page.first        <span class="c"># Record | None</span>
+
+<span class="c"># próxima página</span>
+page = client.list_records_page("app", "users", limit=100, cursor=page.next_cursor)
+
+<span class="c"># iteradores cuidam do cursor e são estáveis sob escritas concorrentes</span>
+<span class="s">for record in client.iter_records</span>("app", "users", page_size=200):
+    ...
+
+<span class="s">for record in client.iter_query</span>("app", "users",
+    filter={"idade": {"$gte": 18}},
+    sort=["-idade"],
+    page_size=200,
+    limit=5000):
+    ...</code></pre>
+
+  <h3>Query e agregações</h3>
+  <pre class="code"><code><span class="s">from lunapy import Sort</span>
+
+result = <span class="s">client.query</span>("app", "users",
+    filter={"$or": [{"idade": {"$gte": 18}}, {"tags": {"$contains": "vip"}}],
+            "endereco.cidade": "SP"},
+    sort=[Sort("idade", "desc"), "-nome"],   <span class="c"># Sort, dict, tupla ou "-campo"</span>
+    fields=["nome", "endereco.cidade"],
+    limit=20, offset=0)
+result.total; result.count; result.records
+result.first                              <span class="c"># Record | None</span>
+
+<span class="c"># valores únicos também funcionam: sort="-idade", fields="nome"</span>
+<span class="c"># e o builder encadeado é equivalente a query():</span>
+result = users.where(idade__gte=18).sort("-idade").select("nome").limit(20).result()
+
+groups = <span class="s">client.aggregate</span>("app", "users",
+    group_by="cidade",                     <span class="c"># ou by="cidade" no handle</span>
+    total="count", receita="sum:valor",
+    ticket={"op": "avg", "field": "valor"},
+    filter={"ativo": True})
+<span class="c"># -> [Record(key={"cidade": "SP"}, count=2, ...), ...]</span>
+groups[0].key.cidade</code></pre>
+
+  <h2 id="k-erros">Erros (<code>lunapy.errors</code>)</h2>
+  <pre class="code"><code>LunaError
+├── LunaConnectionError          <span class="c"># falha de rede</span>
+└── LunaHTTPError                <span class="c"># .status, .message, .payload</span>
+    ├── LunaBadRequestError      <span class="c"># 400</span>
+    │   └── LunaValidationError  <span class="c"># .fields [{field, message}]</span>
+    ├── LunaAuthError            <span class="c"># 401</span>
+    ├── LunaForbiddenError       <span class="c"># 403</span>
+    ├── LunaNotFoundError        <span class="c"># 404</span>
+    └── LunaConflictError        <span class="c"># 409</span>
+        ├── LunaUniqueViolationError   <span class="c"># .fields</span>
+        └── LunaSchemaRejectedError    <span class="c"># .records [{id, fields}]</span></code></pre>
+  <pre class="code"><code><span class="s">from lunapy import LunaUniqueViolationError, LunaValidationError</span>
+
+<span class="s">try</span>:
+    client.create_record("app", "users", {"email": "sem-arroba"})
+<span class="s">except</span> LunaValidationError <span class="s">as</span> err:
+    <span class="s">for</span> problem <span class="s">in</span> err.fields:
+        print(problem["field"], problem["message"])
+<span class="s">except</span> LunaUniqueViolationError:
+    ...</code></pre>
+
+  <h3>Modelos (<code>lunapy.models</code>)</h3>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Modelo</th><th>Campos</th></tr></thead>
+    <tbody>
+      <tr><td><code>Level</code></td><td>str Enum: <code>READ</code>, <code>WRITE</code>, <code>ADMIN</code></td></tr>
+      <tr><td><code>Grant</code></td><td><code>db</code>, <code>level</code></td></tr>
+      <tr><td><code>FieldType</code></td><td><code>STRING</code>, <code>INT</code>, <code>FLOAT</code>, <code>BOOL</code>, <code>DATETIME</code>, <code>DATE</code>, <code>UUID</code>, <code>OBJECT</code>, <code>ARRAY</code>, <code>ANY</code></td></tr>
+      <tr><td><code>AutoField</code></td><td><code>CREATED_AT</code>, <code>UPDATED_AT</code></td></tr>
+      <tr><td><code>Field</code></td><td><code>type</code>, <code>required</code>, <code>nullable</code>, <code>default</code>, <code>encrypted</code>, <code>unique</code>, <code>min</code>, <code>max</code>, <code>min_length</code>, <code>max_length</code>, <code>pattern</code>, <code>enum</code>, <code>items</code>, <code>fields</code>, <code>auto</code>; atalhos <code>Field.string/int/bool/array/...</code></td></tr>
+      <tr><td><code>TableSchema</code></td><td><code>fields</code>, <code>strict</code>, <code>unique</code>; <code>TableSchema.of(...)</code> e <code>unique="campo"</code></td></tr>
+      <tr><td><code>Sort</code></td><td><code>field</code>, <code>dir</code> (<code>"asc"</code>/<code>"desc"</code>); <code>Sort.asc()</code>/<code>Sort.desc()</code></td></tr>
+      <tr><td><code>Record</code></td><td>subclasse de <code>dict</code>: <code>record.campo</code>, <code>record["campo"]</code>, <code>to_dict()</code></td></tr>
+      <tr><td><code>Page</code></td><td><code>total</code>, <code>count</code>, <code>records</code>, <code>next_cursor</code>, <code>first</code></td></tr>
+      <tr><td><code>QueryResult</code> / <code>RecordPage</code></td><td>subclasses de <code>Page</code></td></tr>
+      <tr><td><code>User</code> / <code>Role</code> / <code>DbMeta</code> / <code>ApiKey</code></td><td>dataclasses imutáveis com <code>from_dict</code> (e <code>to_dict</code> em <code>Grant</code>, <code>Field</code>, <code>TableSchema</code>, <code>Sort</code>)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Testes do SDK</h3>
+  <pre class="code"><code>cargo build                       <span class="c"># os testes pytest usam target/debug/lunadb</span>
+python -m pytest lunapy/tests
+<span class="c"># opcional: LUNADB_BIN=/caminho/para/lunadb python -m pytest lunapy/tests</span></code></pre>
+  <p>Os testes sobem o servidor real em porta e storage temporários e cobrem auth, CRUD,
+  schema e unique, criptografia em disco, migração, queries, permissões, API keys, os
+  comandos <code>lunadb apikey ...</code> e os atalhos novos (handles, <code>Record</code>,
+  query builder e schema abreviado).</p>
+</section>
+
+<!-- ============================================================ OPERAÇÃO -->
+<section class="panel" id="p-ops">
+  <header class="page-head">
+    <h1>Operação</h1>
+    <p class="lede">Onde ficam os dados, como fazer backup, como ler os logs e o que fazer
+    quando algo dá errado. Comportamento do código como está hoje (0.0.1); o formato em disco
+    ainda pode mudar antes do 1.0.</p>
+    <nav class="jump" aria-label="Nesta página">
+      <a href="#o-disco">Layout em disco</a>
+      <a href="#o-backup">Backup</a>
+      <a href="#o-capacidade">Capacidade</a>
+      <a href="#o-saude">Saúde e métricas</a>
+      <a href="#o-logs">Logs</a>
+      <a href="#o-problemas">Problemas comuns</a>
+      <a href="#o-upgrade">Atualização</a>
+    </nav>
+  </header>
+
+  <h2 id="o-disco">Layout em disco</h2>
+  <p>Tudo fica sob <code>storage.path</code> da config (<code>~/.lunadb</code> por padrão):</p>
+  <pre class="code"><code>~/.lunadb/
+├── config.toml              <span class="c"># configuração de server, storage, root e log (modo 600)</span>
+├── meta/
+│   ├── users.json           <span class="c"># usuários, hashes de senha e de API key</span>
+│   ├── roles.json
+│   ├── dbs.json
+│   └── master.key           <span class="c"># chave mestra de criptografia (modo 600)</span>
+├── dbs/
+│   └── &lt;db&gt;/
+│       └── &lt;tabela&gt;.msgpack <span class="c"># um arquivo por tabela (ou .json)</span>
+└── infra/
+    ├── status.json          <span class="c"># pid/porta/versão do servidor em execução</span>
+    ├── shell_history
+    └── logs/
+        └── lunadb.log.*     <span class="c"># logs rotacionados</span></code></pre>
+  <div class="callout warn">
+    <p><strong><code>meta/master.key</code></strong> deriva as chaves de criptografia por banco.
+    Se ela for perdida, todo campo <code>encrypted</code> fica ilegível; não é derivada de nada
+    e não há como recuperá-la. <strong><code>meta/users.json</code></strong> guarda os hashes
+    argon2id de senhas e API keys: perdê-lo significa perder todas as credenciais, mas não
+    os dados.</p>
+  </div>
+
+  <h2 id="o-backup">Backup</h2>
+  <p>Não há backup embutido. O backup seguro é uma cópia do diretório de storage feita
+  <strong>com o servidor parado</strong>, para que nenhuma tabela esteja no meio de uma
+  escrita (as escritas são atômicas, mas uma cópia com o servidor rodando pode pegar uma
+  tabela entre duas mudanças):</p>
+  <pre class="code"><code><span class="c"># pare o servidor antes (Ctrl+C ou SIGTERM), depois:</span>
+tar czf lunadb-backup-$(date +%F).tar.gz -C ~ .lunadb</code></pre>
+  <p>A chave mestra faz parte do backup e é necessária para ler campos criptografados.
+  Guarde uma cópia dela em local separado; manter a única cópia junto dos dados anula o
+  propósito dela.</p>
+
+  <h2 id="o-capacidade">Capacidade e limitações conhecidas</h2>
+  <p>O LunaDB guarda um arquivo por tabela e mantém a tabela inteira em memória durante a
+  requisição: uma escrita de registro regrava a tabela inteira (inserção numa tabela de
+  100 mil registros codifica e faz fsync de todos os 100 mil). Escritas na mesma tabela
+  são serializadas; em tabelas diferentes rodam em paralelo. Índices <code>unique</code>
+  são reconstruídos a cada escrita. Leituras decodificam a tabela inteira antes de filtrar
+  — <code>limit</code>/<code>cursor</code> limitam a resposta, não o trabalho feito.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Tamanho da tabela</th><th>Comportamento</th></tr></thead>
+    <tbody>
+      <tr><td>até ~10 mil registros</td><td>confortável para uso interativo</td></tr>
+      <tr><td>~10 mil a 100 mil</td><td>cada escrita recodifica o arquivo; agrupe o trabalho em menos requisições maiores</td></tr>
+      <tr><td>acima de ~100 mil</td><td>não recomendado; divida os dados em várias tabelas</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Não há transações multi-tabela nem índices secundários além de <code>unique</code> —
+  consistência entre tabelas é responsabilidade do cliente. Pré-1.0, trate os números como
+  orientação e não como contrato; meça com o tamanho real dos seus registros.</p>
+
+  <h2 id="o-saude">Saúde, status e métricas</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Endpoint</th><th>Auth</th><th>Para que serve</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m get">GET</span> <code>/health</code></td><td>público</td><td>só liveness; não toca no storage, então responder bem não prova que os dados estão legíveis</td></tr>
+      <tr><td><span class="m get">GET</span> <code>/status</code></td><td>admin</td><td><code>pid</code>, <code>version</code>, <code>uptime_seconds</code>, <code>host</code>/<code>port</code>, <code>storage</code>, contagens de <code>users</code> e <code>dbs</code></td></tr>
+      <tr><td><span class="m get">GET</span> <code>/metrics</code></td><td>público</td><td><code>lunadb_build_info</code>, <code>lunadb_uptime_seconds</code>, <code>lunadb_requests_total</code>, <code>lunadb_responses_total{status_class="2xx|3xx|4xx|5xx"}</code>; apenas agregados, sem dados sensíveis</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Razão crescente de <code>4xx</code>/<code>5xx</code> em <code>/metrics</code> é a primeira
+  coisa a olhar; os contadores são do processo e zeram quando o servidor reinicia.</p>
+
+  <h2 id="o-logs">Logs</h2>
+  <pre class="code"><code><span class="s">[logging]</span>
+level    = "info"      <span class="c"># trace | debug | info | warn | error</span>
+console  = true        <span class="c"># também escreve no stdout</span>
+file     = true        <span class="c"># escreve em infra/logs/</span>
+rotation = "daily"     <span class="c"># never | hourly | daily</span>
+max_files = 7          <span class="c"># quantos arquivos rotacionados manter</span></code></pre>
+  <p><code>RUST_LOG</code> sobrepõe o nível quando definido, por exemplo
+  <code>RUST_LOG=lunadb=debug lunadb serve</code>. Ao depurar, procure por dois tipos de linha:</p>
+  <ul class="bullets">
+    <li><strong><code>lunadb::ops</code></strong>: uma entrada por operação, com <code>op</code>, <code>user</code>, <code>db</code>, <code>table</code> e um <code>count</code>/<code>id</code>. Busque por <code>grep 'op="create_record"' lunadb.log</code>.</li>
+    <li><strong><code>http_request</code></strong>: <code>method</code>, <code>uri</code>, <code>status</code> e <code>latency_ms</code>; erros de cliente em <code>warn</code>, de servidor em <code>error</code>.</li>
+  </ul>
+  <p>Valores sensíveis nunca são logados: senhas, API keys e campos criptografados permanecem
+  cifrados até no arquivo da tabela.</p>
+
+  <h2 id="o-problemas">Problemas comuns</h2>
+  <details class="problem">
+    <summary><code>error: api key missing or invalid</code> (401)</summary>
+    <p>A chave está ausente, revogada ou pertence a um login rotacionado: o
+    <code>POST /auth/login</code> rotaciona apenas a key chamada <code>login</code> — keys
+    criadas com <code>lunadb apikey create</code> continuam válidas até revogação. Se você
+    trocou a senha, <strong>todas</strong> as chaves do usuário foram revogadas; logue de novo.</p>
+  </details>
+  <details class="problem">
+    <summary><code>too many attempts; try again in Ns</code> (429)</summary>
+    <p>Após 5 falhas consecutivas para o mesmo usuário, o login fica bloqueado por
+    60 segundos. Um login bem-sucedido zera o contador. O bloqueio é por usuário: outra
+    conta não é afetada.</p>
+  </details>
+  <details class="problem">
+    <summary><code>no access to db '&lt;nome&gt;'</code> (403)</summary>
+    <p>O usuário não tem grant que cubra esse banco. O nível efetivo é o máximo entre os
+    grants do usuário e as permissões da role, com <code>*</code> valendo para qualquer banco.
+    Confira com <code>GET /me</code> e <code>GET /roles</code>.</p>
+  </details>
+  <details class="problem">
+    <summary><code>option 'admin' required</code> ao excluir um banco</summary>
+    <p>Só um admin (ou um grant de <code>admin</code> naquele banco) pode excluí-lo;
+    <code>admin</code> é estritamente mais forte que <code>write</code>.</p>
+  </details>
+  <details class="problem">
+    <summary><code>schema rejected by existing records</code> (409)</summary>
+    <p>A mudança de schema invalidaria registros; a resposta lista ids e campos problemáticos.
+    Corrija os registros antes ou repita com <code>force=true</code> para manter os inválidos
+    como estão, por exemplo <code>schema set app usuarios '&lt;json&gt;' --force</code>.</p>
+  </details>
+  <details class="problem">
+    <summary><code>failed to decrypt field '&lt;nome&gt;'</code> (500)</summary>
+    <p>O valor armazenado não decifra com a chave mestra atual: <code>LUNADB_MASTER_KEY</code>
+    diferente, arquivo substituído ou chave movida entre bancos. <strong>Os dados não são
+    recuperáveis sem a chave original</strong>; restaure <code>meta/master.key</code> do backup
+    (não apague o campo, para não perder dados que a chave restaurada ainda leria).</p>
+  </details>
+  <details class="problem">
+    <summary><code>server appears to be running</code> no <code>lunadb migrate</code></summary>
+    <p>O <code>migrate</code> reescreve todos os arquivos de tabela e se recusa a rodar com o
+    servidor no ar. Pare-o, ou passe <code>--force</code> se tiver certeza. A checagem confirma
+    que o pid de <code>infra/status.json</code> ainda está vivo, então um resíduo de um servidor
+    que caiu não bloqueia.</p>
+  </details>
+  <details class="problem">
+    <summary>O servidor não sobe</summary>
+    <p><code>os error 99</code>: <code>server.host</code> aponta para um endereço que não existe
+    nesta máquina (use <code>127.0.0.1</code> ou <code>0.0.0.0</code>).
+    <code>Address already in use</code>: outra porta ocupada, verifique
+    <code>ss -ltnp | grep 7700</code>. <code>failed to read master key</code>: storage errado ou
+    incompleto; rode <code>lunadb init</code>.</p>
+  </details>
+  <details class="problem">
+    <summary>Arquivo de tabela parece corrompido</summary>
+    <p>As escritas são atômicas (arquivo temporário + rename), então um arquivo pela metade é
+    improvável. Se uma tabela não parseia, inspecione o arquivo direto: <code>.msgpack</code> é
+    MessagePack e <code>.json</code> é JSON indentado. Restaure só aquele arquivo de um backup
+    com o servidor parado.</p>
+  </details>
+
+  <h2 id="o-upgrade">Atualização de versão</h2>
+  <ol class="steps">
+    <li>Pare o servidor e faça backup (incluindo <code>meta/master.key</code>).</li>
+    <li>Compile ou instale o binário novo.</li>
+    <li>Apague o <code>infra/status.json</code> antigo se estiver obsoleto; ele é recriado na subida.</li>
+    <li>Suba o servidor, confira o <code>GET /health</code>, faça login e leia uma tabela.</li>
+  </ol>
+  <p>Não há migração automática do layout de storage além do <code>lunadb migrate</code>,
+  que apenas converte tabelas entre JSON e MessagePack.</p>
+</section>
+
+</main>
+
+<footer class="page-foot">
+  <p>LunaDB 0.0.1 (pré-1.0), código licenciado sob MIT.
+  Fonte desta documentação: <code>docs/api-pt.md</code>, <code>docs/shell-pt.md</code>,
+  <code>docs/sdk-pt.md</code> e <code>docs/operations-pt.md</code>.
+  As abas funcionam por teclado (setas) e sem JavaScript.</p>
+</footer>
+
+</body>
+</html>
